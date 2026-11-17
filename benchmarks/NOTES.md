@@ -58,6 +58,23 @@ What this suggests, but has not been isolated:
   shared that the threads wait on (the memory allocator, memory bandwidth or the shared L3 cache).
   Which one it is has **not** been measured. Nothing here should be quoted as the cause.
 
-Likely improvements, for a later pass if the numbers matter: merge the workers' already-sorted lists
-instead of appending and sorting, so the merge shrinks with more threads; and test a different
-allocator or per-thread arenas for the tokenize phase.
+### Why the merge does not scale (measured)
+
+CPU seconds summed over all merge threads, from a scratch driver (single runs, exploratory, same
+caveat as above), for the three merge steps:
+
+| Threads | Combining the workers' lists | Sorting | Freeing the leftover maps |
+|---:|---:|---:|---:|
+| 4 | 2.3 | 1.7 | 1.0 |
+| 12 | 7.9 | 2.1 | 4.1 |
+| 20 | 16.4 | 2.6 | 9.9 |
+
+Dividing by the thread count gives the 1.2 to 1.5 s wall time seen in B1. The sort is the cheapest
+step and barely grows. The other two grow with the thread count, because every worker keeps its own
+entry for almost every common term, so 20 workers mean about 20 copies of each to combine and free.
+A first guess that re-sorting was the cost was wrong.
+
+A real fix has to stop the work from growing with the number of workers, for example a shared term
+dictionary or sorted runs merged in one pass (the same structure the bounded-memory SPIMI build in
+Phase 9 needs). Small tweaks to the current merge would save maybe a quarter of it, so the current
+design is kept and this limit is reported as it is.

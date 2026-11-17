@@ -11,7 +11,7 @@
 #   tools/run_benchmarks.sh b8 --machine laptop --profile main [--budgets 256M,512M,1G] [--threads 4,auto]
 #                                                      [--repeat N]   (bounded-memory builds)
 #
-#   tools/run_benchmarks.sh all --machine laptop --profile main               (b2, then the rest)
+#   tools/run_benchmarks.sh all --machine laptop --profile main               (b2, then the rest, b8 last)
 #
 # b8 builds the corpus within each memory budget in a fresh process (so the peak memory is that
 # build's alone) and keeps the index of the last one as data/index/<profile>/vbyte.bin if there is none
@@ -50,9 +50,15 @@ cd "$root"
 if [ "$benchmark" = all ]; then
   # b2 first: it writes the index files that the others read. b5 needs the build time from b1.
   # b8 is a separate step: for `full`, b1 and b2 (in-memory builds) do not fit.
-  for each in b2 b1 b3 b4 b5 b6 b7; do
+  for each in b2 b1 b3 b4 b5 b6 b7 b8; do
+    if [ "$each" = b8 ] && [ "$profile" = full ]; then continue; fi
     echo "==== $each ===="
-    "$0" "$each" --machine "$machine" --profile "$profile" --threads "$threads" --repeat "$repeat"
+    if [ "$each" = b8 ]; then
+      # b8 has its own thread counts (4 and all of them): a sweep is not what it wants
+      "$0" b8 --machine "$machine" --profile "$profile" --repeat "$repeat"
+    else
+      "$0" "$each" --machine "$machine" --profile "$profile" --threads "$threads" --repeat "$repeat"
+    fi
   done
   exit 0
 fi

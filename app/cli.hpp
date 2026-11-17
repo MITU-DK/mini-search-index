@@ -74,6 +74,20 @@ struct IndexArgs {
 [[nodiscard]] std::expected<IndexArgs, std::string> parse_index_args(
     std::span<const std::string_view> args);
 
+struct ServeArgs {
+  std::filesystem::path index;
+  std::filesystem::path web_dir = "web";
+  std::filesystem::path
+      corpus;  // read previews from here instead of the folder stored in the index
+  std::string host = "127.0.0.1";
+  int port = 8080;  // 0 picks a free port
+  unsigned threads = 1;
+};
+
+// Parses what follows `msearch serve`: `-i <index>` is required. --threads defaults to `auto`.
+[[nodiscard]] std::expected<ServeArgs, std::string> parse_serve_args(
+    std::span<const std::string_view> args);
+
 // Runs `msearch <args>`: results go to `out`, progress and errors to `err`, and `search` reads its
 // queries from `in`. Returns the process exit code: 0 on success, 1 on any error.
 int run_cli(std::span<const std::string_view> args, std::istream& in, std::ostream& out,

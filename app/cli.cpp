@@ -1,16 +1,20 @@
 #include "cli.hpp"
 
+#include <atomic>
 #include <charconv>
 #include <chrono>
+#include <csignal>
 #include <format>
 #include <iostream>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 
 #include "autocomplete.hpp"
 #include "index_writer.hpp"
 #include "indexer.hpp"
 #include "searcher.hpp"
+#include "server.hpp"
 
 namespace mse {
 namespace {
@@ -28,6 +32,9 @@ constexpr std::string_view kUsage =
     "<text>...\n"
     "  msearch query -i <index.bin> --count-only <word>\n"
     "  msearch search -i <index.bin> [--load mmap|read] [--corpus <dir>] [--rank ...] [-k N]\n"
+    "  msearch serve -i <index.bin> [--port 8080] [--threads N|auto] [--web web/] [--corpus "
+    "<dir>]\n"
+    "                [--host 127.0.0.1]\n"
     "  msearch --help\n"
     "\n"
     "index builds the index and saves it to a file.\n"
@@ -35,6 +42,9 @@ constexpr std::string_view kUsage =
     "search opens a saved index once and answers one query per line until the input ends.\n"
     "In search, \":suggest <prefix>\" completes a word, and \"quit\" ends the session.\n"
     "With -i, --corpus tells where to read the previews from instead of the stored folder.\n"
+    "serve answers searches over HTTP (a JSON API and a web page) until it is stopped with "
+    "Ctrl-C.\n"
+    "It listens on this machine only, unless --host says otherwise.\n"
     "Use \"--\" before the query text if the text itself starts with \"-\".\n";
 
 std::string_view trim(std::string_view text) {
@@ -280,7 +290,97 @@ int run_search(const QueryArgs& args, std::istream& in, std::ostream& out, std::
   return 0;
 }
 
+// Ctrl-C and SIGTERM only set a flag (the one thing a signal handler may safely do); a watcher
+// thread sees it and stops the server.
+std::atomic<bool> g_stop_requested{false};
+extern "C" void request_stop(int) { g_stop_requested.store(true); }
+
+int run_serve(const ServeArgs& args, std::ostream& out, std::ostream& err) {
+  const auto start = std::chrono::steady_clock::now();
+  const auto index = Index::open(args.index, LoadMode::Mmap);
+  if (!index) {
+    err << "error: " << index.error() << "\n";
+    return 1;
+  }
+  err << std::format(
+      "Index opened in {:.2f} ms\n",
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+
+  ServerConfig config;
+  config.threads = args.threads;
+  config.web_dir = args.web_dir;
+  config.corpus_root = args.corpus;
+  config.host = args.host;
+  SearchServer server(index->view(), config);
+  const auto port = server.bind(args.port);
+  if (!port) {
+    err << "error: " << port.error() << "\n";
+    return 1;
+  }
+
+  g_stop_requested = false;
+  const auto old_int = std::signal(SIGINT, request_stop);
+  const auto old_term = std::signal(SIGTERM, request_stop);
+  std::atomic<bool> finished{false};
+  std::thread watcher([&] {
+    while (!finished && !g_stop_requested)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (g_stop_requested) server.stop();
+  });
+  std::jthread runner([&] { server.run(); });
+  server.wait_until_ready();
+  out << std::format("Serving {} docs on http://{}:{}/ with {} threads. Ctrl-C to stop.\n",
+                     index->view().num_docs(), args.host, *port, args.threads)
+      << std::flush;
+  runner.join();  // returns once stop() has been called
+  finished = true;
+  watcher.join();
+  std::signal(SIGINT, old_int);
+  std::signal(SIGTERM, old_term);
+  out << "Stopped.\n";
+  return 0;
+}
+
 }  // namespace
+
+std::expected<ServeArgs, std::string> parse_serve_args(std::span<const std::string_view> args) {
+  ServeArgs parsed;
+  parsed.threads = resolve_threads("auto");
+  bool saw_index = false;
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view arg = args[i];
+    const bool known = arg == "-i" || arg == "--port" || arg == "--threads" || arg == "--web" ||
+                       arg == "--corpus" || arg == "--host";
+    if (!known) return std::unexpected("unknown option \"" + std::string(arg) + "\"");
+    if (i + 1 >= args.size()) return std::unexpected(std::string(arg) + " needs a value");
+    const std::string_view value = args[++i];
+    if (arg == "-i") {
+      parsed.index = value;
+      saw_index = true;
+    } else if (arg == "--web") {
+      parsed.web_dir = value;
+    } else if (arg == "--corpus") {
+      parsed.corpus = value;
+    } else if (arg == "--host") {
+      parsed.host = value;
+    } else if (arg == "--threads") {
+      const auto threads = parse_threads(value);
+      if (!threads) return std::unexpected(threads.error());
+      parsed.threads = *threads;
+    } else {  // --port
+      int port = 0;
+      const char* const end = value.data() + value.size();
+      const auto [stop, error] = std::from_chars(value.data(), end, port);
+      if (error != std::errc() || stop != end || port < 0 || port > 65535) {
+        return std::unexpected("--port needs a number from 0 to 65535, got \"" +
+                               std::string(value) + "\"");
+      }
+      parsed.port = port;
+    }
+  }
+  if (!saw_index) return std::unexpected("-i <index file> is required");
+  return parsed;
+}
 
 std::string format_results(std::span<const ResultLine> lines, double took_ms, bool color) {
   if (lines.empty()) return std::format("No results (found in {:.2f} ms).\n", took_ms);
@@ -388,6 +488,11 @@ int run_cli(std::span<const std::string_view> args, std::istream& in, std::ostre
     const auto parsed = parse_index_args(args.subspan(1));
     if (!parsed) return usage_error(parsed.error(), err);
     return run_index(*parsed, out, err);
+  }
+  if (command == "serve") {
+    const auto parsed = parse_serve_args(args.subspan(1));
+    if (!parsed) return usage_error(parsed.error(), err);
+    return run_serve(*parsed, out, err);
   }
   if (command == "query" || command == "search") {
     const bool is_query = command == "query";

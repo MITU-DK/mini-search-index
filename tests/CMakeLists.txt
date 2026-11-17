@@ -9,7 +9,8 @@ FetchContent_MakeAvailable(googletest)
 
 file(GLOB MSE_TEST_SOURCES CONFIGURE_DEPENDS *.cpp)
 add_executable(mse_tests ${MSE_TEST_SOURCES})
-target_link_libraries(mse_tests PRIVATE mse_app mse_core GTest::gtest_main)
+target_link_libraries(mse_tests PRIVATE mse_app mse_core mse_server httplib::httplib
+                      GTest::gtest_main)
 target_compile_options(mse_tests PRIVATE ${MSE_WARNINGS})
 target_compile_definitions(mse_tests PRIVATE
   MSE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")

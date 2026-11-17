@@ -213,6 +213,55 @@ TEST(Cli, HelpPrintsUsageAndSucceeds) {
   }
 }
 
+// ---- parse_serve_args ----
+
+TEST(Cli, ParseServeArgsFull) {
+  auto parsed = parse_serve_args(Args{"-i", "idx.bin", "--port", "9000", "--threads", "6", "--web",
+                                      "site", "--corpus", "data/main", "--host", "0.0.0.0"});
+  ASSERT_TRUE(parsed.has_value()) << parsed.error();
+  EXPECT_EQ(parsed->index, "idx.bin");
+  EXPECT_EQ(parsed->port, 9000);
+  EXPECT_EQ(parsed->threads, 6u);
+  EXPECT_EQ(parsed->web_dir, "site");
+  EXPECT_EQ(parsed->corpus, "data/main");
+  EXPECT_EQ(parsed->host, "0.0.0.0");
+}
+
+TEST(Cli, ParseServeArgsDefaults) {
+  auto parsed = parse_serve_args(Args{"-i", "idx.bin"});
+  ASSERT_TRUE(parsed.has_value()) << parsed.error();
+  EXPECT_EQ(parsed->port, 8080);
+  EXPECT_EQ(parsed->web_dir, "web");
+  EXPECT_EQ(parsed->host, "127.0.0.1");  // only this machine, unless asked
+  EXPECT_GE(parsed->threads, 1u);
+  EXPECT_TRUE(parsed->corpus.empty());
+}
+
+TEST(Cli, ParseServeArgsErrors) {
+  const std::vector<Args> bad = {
+      {},                                    // no index
+      {"-i"},                                // -i without a value
+      {"-i", "idx.bin", "--port", "abc"},    // not a number
+      {"-i", "idx.bin", "--port", "70000"},  // not a port
+      {"-i", "idx.bin", "--port", "-1"},
+      {"-i", "idx.bin", "--threads", "0"},
+      {"-i", "idx.bin", "--bogus"},
+      {"-i", "idx.bin", "extra"},
+  };
+  for (const Args& args : bad) {
+    EXPECT_FALSE(parse_serve_args(args).has_value())
+        << args.size() << " args, first: " << (args.empty() ? "" : std::string(args[0]));
+  }
+  // port 0 means "pick a free one", which is allowed
+  EXPECT_TRUE(parse_serve_args(Args{"-i", "idx.bin", "--port", "0"}).has_value());
+}
+
+TEST(Cli, ServeWithAMissingIndexFailsCleanly) {
+  const CliRun result = run({"serve", "-i", "/nonexistent/index.bin"});
+  EXPECT_EQ(result.code, 1);
+  EXPECT_NE(result.err.find("error:"), std::string::npos);
+}
+
 // ---- parse_index_args ----
 
 TEST(Cli, ParseIndexArgsFull) {

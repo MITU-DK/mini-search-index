@@ -13,7 +13,8 @@ target_link_libraries(mse_tests PRIVATE mse_app mse_core mse_server httplib::htt
                       GTest::gtest_main)
 target_compile_options(mse_tests PRIVATE ${MSE_WARNINGS})
 target_compile_definitions(mse_tests PRIVATE
-  MSE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+  MSE_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data"
+  MSE_WEB_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../web")
 
 include(GoogleTest)
 gtest_discover_tests(mse_tests)

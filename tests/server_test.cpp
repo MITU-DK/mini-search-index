@@ -4,6 +4,8 @@
 #include <httplib.h>
 
 #include <atomic>
+#include <filesystem>
+#include <fstream>
 #include <nlohmann/json.hpp>
 #include <random>
 #include <thread>
@@ -295,6 +297,21 @@ TEST(Server, ServesTheWebPage) {
   EXPECT_EQ(page->get_header_value("X-Content-Type-Options"), "nosniff");
   EXPECT_FALSE(page->get_header_value("Content-Security-Policy").empty());
   EXPECT_EQ(client.Get("/secret.txt")->status, 404);  // only index.html is ever served
+}
+
+// The page shows text from the corpus, so it must never hand that text to the HTML parser, and it
+// must not pull in anything from another site (the server's CSP would block it anyway).
+TEST(Server, ShippedWebPageIsSafe) {
+  std::ifstream in(std::filesystem::path(MSE_WEB_DIR) / "index.html", std::ios::binary);
+  ASSERT_TRUE(in) << "web/index.html is missing";
+  const std::string page{std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+  for (const char* sink : {"innerHTML", "outerHTML", "insertAdjacentHTML", "document.write",
+                           "eval(", "new Function", "srcdoc"}) {
+    EXPECT_EQ(page.find(sink), std::string::npos) << "found " << sink;
+  }
+  EXPECT_EQ(page.find("http://"), std::string::npos);
+  EXPECT_EQ(page.find("https://"), std::string::npos);
+  EXPECT_EQ(page.find("<script src"), std::string::npos);
 }
 
 TEST(Server, MissingWebPageIsNotFoundNotACrash) {

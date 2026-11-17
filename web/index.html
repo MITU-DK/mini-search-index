@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mini Search Engine</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --panel: #ffffff; --text: #1d1f23; --muted: #62676f; --line: #dcdee2;
+    --accent: #1f5fd1; --mark: #ffe58a; --focus: #1f5fd1; --error: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161a; --panel: #1c1f24; --text: #e8e9eb; --muted: #9aa0a8; --line: #343840;
+      --accent: #7aa7ff; --mark: #6b5a12; --focus: #7aa7ff; --error: #ff8a80;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 760px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 1.25rem; margin: 0 0 16px; font-weight: 650; }
+  h1 span { color: var(--muted); font-weight: 400; font-size: 0.9rem; margin-left: 8px; }
+
+  form { position: relative; }
+  .box { display: flex; gap: 8px; }
+  input[type=search] {
+    flex: 1; min-width: 0; font: inherit; padding: 12px 14px; color: var(--text);
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  }
+  button {
+    font: inherit; padding: 0 18px; border: 0; border-radius: 10px; cursor: pointer;
+    background: var(--accent); color: #fff; font-weight: 600;
+  }
+  @media (prefers-color-scheme: dark) { button { color: #0b1020; } }
+  input:focus-visible, button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+  #suggestions {
+    position: absolute; left: 0; right: 0; top: calc(100% + 4px); z-index: 5; margin: 0; padding: 4px;
+    list-style: none; background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(0,0,0,.12);
+  }
+  #suggestions[hidden] { display: none; }
+  #suggestions li { padding: 8px 10px; border-radius: 6px; cursor: pointer; }
+  #suggestions li[aria-selected=true], #suggestions li:hover { background: var(--mark); }
+
+  #status { margin: 18px 0 6px; color: var(--muted); font-size: 0.9rem; }
+  #status .fix { color: var(--text); font-size: 1rem; display: block; margin-bottom: 2px; }
+  #status.error { color: var(--error); }
+  .hit { padding: 14px 0; border-top: 1px solid var(--line); }
+  .hit:first-child { border-top: 0; }
+  .hit h2 { margin: 0; font-size: 1.05rem; font-weight: 600; color: var(--accent); overflow-wrap: anywhere; }
+  .score { color: var(--muted); font-size: 0.8rem; font-variant-numeric: tabular-nums; margin-left: 8px; font-weight: 400; }
+  .snippet { margin: 4px 0 0; overflow-wrap: anywhere; }
+  .snippet.missing { color: var(--muted); font-style: italic; }
+  mark { background: var(--mark); color: inherit; border-radius: 3px; padding: 0 1px; }
+  .hint { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Mini Search Engine <span id="corpus"></span></h1>
+  <form id="form" role="search" autocomplete="off">
+    <div class="box">
+      <input id="q" type="search" name="q" placeholder="Search Wikipedia" aria-label="Search"
+             role="combobox" aria-expanded="false" aria-controls="suggestions"
+             aria-autocomplete="list" autofocus spellcheck="false" autocapitalize="off">
+      <button type="submit">Search</button>
+    </div>
+    <ul id="suggestions" role="listbox" hidden></ul>
+  </form>
+  <div id="status" role="status" aria-live="polite"></div>
+  <div id="results"></div>
+</main>
+
+<script>
+"use strict";
+const input = document.getElementById("q");
+const form = document.getElementById("form");
+const list = document.getElementById("suggestions");
+const statusEl = document.getElementById("status");
+const resultsEl = document.getElementById("results");
+
+const encoder = new TextEncoder();
+const decoder = new TextDecoder("utf-8");
+
+// ---- results ----
+
+// Highlight ranges are [offset, length] in bytes of the UTF-8 snippet, not in JavaScript
+// characters, so the text is cut as bytes. Everything is added as text nodes and <mark> elements;
+// nothing from the server is ever parsed as HTML.
+function snippetNode(hit) {
+  const p = document.createElement("p");
+  p.className = "snippet";
+  if (typeof hit.snippet !== "string") {
+    p.className += " missing";
+    p.textContent = "(preview unavailable)";
+    return p;
+  }
+  const bytes = encoder.encode(hit.snippet);
+  const add = (from, to, mark) => {
+    if (to <= from) return;
+    const text = decoder.decode(bytes.subarray(from, to));
+    if (mark) {
+      const m = document.createElement("mark");
+      m.textContent = text;
+      p.appendChild(m);
+    } else {
+      p.appendChild(document.createTextNode(text));
+    }
+  };
+  if (hit.cut_before) p.appendChild(document.createTextNode("… "));
+  let pos = 0;
+  for (const range of hit.highlights) {
+    const start = range[0], end = range[0] + range[1];
+    if (start < pos || end > bytes.length) continue;  // ignore anything out of order or out of range
+    add(pos, start, false);
+    add(start, end, true);
+    pos = end;
+  }
+  add(pos, bytes.length, false);
+  if (hit.cut_after) p.appendChild(document.createTextNode(" …"));
+  return p;
+}
+
+function hitNode(hit) {
+  const article = document.createElement("article");
+  article.className = "hit";
+  const title = document.createElement("h2");
+  title.textContent = hit.title;
+  const score = document.createElement("span");
+  score.className = "score";
+  score.textContent = hit.score.toFixed(2);
+  title.appendChild(score);
+  article.append(title, snippetNode(hit));
+  return article;
+}
+
+function showStatus(text, isError) {
+  statusEl.className = isError ? "error" : "";
+  statusEl.textContent = text;
+}
+
+function showResults(data) {
+  statusEl.className = "";
+  statusEl.replaceChildren();
+  if (data.corrected_query) {
+    const fix = document.createElement("span");
+    fix.className = "fix";
+    fix.append("Showing results for ");
+    const b = document.createElement("strong");
+    b.textContent = data.corrected_query;
+    fix.append(b, ` (no match for “${data.query}”)`);
+    statusEl.appendChild(fix);
+  }
+  const count = data.hits.length;
+  statusEl.append(count === 0 ? `No results (${data.took_ms.toFixed(2)} ms)`
+                              : `${count} result${count === 1 ? "" : "s"} in ${data.took_ms.toFixed(2)} ms`);
+  resultsEl.replaceChildren(...data.hits.map(hitNode));
+}
+
+let searchSeq = 0;
+async function search(query, pushHistory) {
+  const seq = ++searchSeq;
+  hideSuggestions();
+  query = query.trim();
+  if (pushHistory) history.replaceState(null, "", query ? "?q=" + encodeURIComponent(query) : location.pathname);
+  if (!query) {
+    resultsEl.replaceChildren();
+    showStatus("Type something to search.", false);
+    return;
+  }
+  try {
+    const response = await fetch("/api/search?q=" + encodeURIComponent(query));
+    const data = await response.json();
+    if (seq !== searchSeq) return;  // a newer search has started; drop this answer
+    if (!response.ok) {
+      resultsEl.replaceChildren();
+      showStatus(data.error || "Search failed.", true);
+      return;
+    }
+    showResults(data);
+  } catch (e) {
+    if (seq !== searchSeq) return;
+    resultsEl.replaceChildren();
+    showStatus("Could not reach the server.", true);
+  }
+}
+
+// ---- autocomplete ----
+
+let suggestions = [];
+let active = -1;
+let suggestTimer = 0;
+let suggestSeq = 0;
+
+function hideSuggestions() {
+  clearTimeout(suggestTimer);
+  suggestSeq++;
+  suggestions = [];
+  active = -1;
+  list.hidden = true;
+  list.replaceChildren();
+  input.setAttribute("aria-expanded", "false");
+  input.removeAttribute("aria-activedescendant");
+}
+
+function setActive(index) {
+  active = index;
+  [...list.children].forEach((li, i) => li.setAttribute("aria-selected", String(i === index)));
+  if (index >= 0) input.setAttribute("aria-activedescendant", "s" + index);
+  else input.removeAttribute("aria-activedescendant");
+}
+
+function renderSuggestions() {
+  list.replaceChildren(...suggestions.map((word, i) => {
+    const li = document.createElement("li");
+    li.id = "s" + i;
+    li.setAttribute("role", "option");
+    li.setAttribute("aria-selected", "false");
+    li.textContent = word;
+    // mousedown, not click: it fires before the input loses focus
+    li.addEventListener("mousedown", (event) => { event.preventDefault(); choose(i); });
+    return li;
+  }));
+  const open = suggestions.length > 0;
+  list.hidden = !open;
+  input.setAttribute("aria-expanded", String(open));
+  active = -1;
+}
+
+// The word being typed is the part after the last space; a suggestion replaces just that word.
+function lastWordStart() {
+  return input.value.lastIndexOf(" ") + 1;
+}
+
+function choose(index) {
+  const start = lastWordStart();
+  input.value = input.value.slice(0, start) + suggestions[index] + " ";
+  hideSuggestions();
+  input.focus();
+}
+
+function askForSuggestions() {
+  const prefix = input.value.slice(lastWordStart());
+  clearTimeout(suggestTimer);
+  if (prefix.length < 2) { hideSuggestions(); return; }
+  const seq = ++suggestSeq;
+  suggestTimer = setTimeout(async () => {
+    try {
+      const response = await fetch("/api/suggest?prefix=" + encodeURIComponent(prefix));
+      if (!response.ok) return;
+      const words = await response.json();
+      if (seq !== suggestSeq) return;  // typed more since; drop it
+      suggestions = words;
+      renderSuggestions();
+    } catch (e) { /* suggestions are optional; stay quiet */ }
+  }, 150);
+}
+
+input.addEventListener("input", askForSuggestions);
+input.addEventListener("blur", hideSuggestions);
+input.addEventListener("keydown", (event) => {
+  if (list.hidden || suggestions.length === 0) return;
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    setActive((active + 1) % suggestions.length);
+  } else if (event.key === "ArrowUp") {
+    event.preventDefault();
+    setActive(active <= 0 ? suggestions.length - 1 : active - 1);
+  } else if (event.key === "Enter" && active >= 0) {
+    event.preventDefault();  // Enter picks the highlighted word; a second Enter searches
+    choose(active);
+  } else if (event.key === "Escape") {
+    hideSuggestions();
+  }
+});
+
+form.addEventListener("submit", (event) => {
+  event.preventDefault();
+  search(input.value, true);
+});
+
+// ---- start ----
+
+const initial = new URLSearchParams(location.search).get("q");
+if (initial) {
+  input.value = initial;
+  search(initial, false);
+} else {
+  showStatus("Type something to search.", false);
+}
+</script>
+</body>
+</html>

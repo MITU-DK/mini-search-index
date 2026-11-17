@@ -1,5 +1,7 @@
 # Mini Search Engine
 
+![C++23](https://img.shields.io/badge/C%2B%2B-23-blue) ![License: MIT](https://img.shields.io/badge/license-MIT-green) ![Sanitizers: ASan, UBSan, TSan](https://img.shields.io/badge/sanitizers-ASan%20%7C%20UBSan%20%7C%20TSan-informational)
+
 A search engine for English Wikipedia, written in C++23 from scratch: BM25 and TF-IDF ranking, a
 multithreaded indexer, a compressed on-disk index that opens instantly with `mmap`, autocomplete,
 "did you mean" spell correction, and an HTTP server with a small web UI. No search library is used.
@@ -215,6 +217,10 @@ It builds, tests, downloads and prepares the corpus, runs B1 to B7 and packs the
 .venv/bin/python tools/plot_scaling.py benchmarks/results docs/img/scaling.svg
 python3 tools/make_readme.py README.md benchmarks/results
 ```
+
+## License
+
+MIT, see [LICENSE](LICENSE).
 
 ## Layout
 

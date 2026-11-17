@@ -2,7 +2,6 @@
 
 #include <array>
 #include <cstddef>
-#include <utility>
 
 #include "constants.hpp"
 
@@ -33,8 +32,8 @@ std::string normalize_term(std::string_view word) {
   return out;
 }
 
-std::vector<std::string> tokenize(std::string_view text) {
-  std::vector<std::string> tokens;
+std::vector<TokenSpan> tokenize_spans(std::string_view text) {
+  std::vector<TokenSpan> spans;
   std::size_t i = 0;
   while (i < text.size()) {
     if (!is_word(text[i])) {
@@ -43,8 +42,17 @@ std::vector<std::string> tokenize(std::string_view text) {
     }
     const std::size_t start = i;
     while (i < text.size() && is_word(text[i])) ++i;
-    std::string token = normalize_term(text.substr(start, i - start));
-    if (!token.empty()) tokens.push_back(std::move(token));
+    if (i - start <= kMaxTokenLen) spans.push_back({start, i - start});
+  }
+  return spans;
+}
+
+std::vector<std::string> tokenize(std::string_view text) {
+  const std::vector<TokenSpan> spans = tokenize_spans(text);
+  std::vector<std::string> tokens;
+  tokens.reserve(spans.size());
+  for (const TokenSpan& span : spans) {
+    tokens.push_back(normalize_term(text.substr(span.offset, span.length)));
   }
   return tokens;
 }

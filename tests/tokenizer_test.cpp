@@ -40,5 +40,27 @@ TEST(Tokenizer, NormalizeTermTooLongIsEmpty) {
   EXPECT_EQ(normalize_term(std::string(65, 'a')), "");
 }
 
+TEST(Tokenizer, SpansGiveByteRanges) {
+  // "café" is 5 bytes, so it starts at byte 4 and is 5 bytes long.
+  const auto spans = tokenize_spans("Hi, café!");
+  ASSERT_EQ(spans.size(), 2u);
+  EXPECT_EQ(spans[0].offset, 0u);
+  EXPECT_EQ(spans[0].length, 2u);
+  EXPECT_EQ(spans[1].offset, 4u);
+  EXPECT_EQ(spans[1].length, 5u);
+}
+
+TEST(Tokenizer, SpansSkipOverlongTokens) {
+  const auto spans = tokenize_spans(std::string(65, 'a') + " ok");
+  ASSERT_EQ(spans.size(), 1u);
+  EXPECT_EQ(spans[0].offset, 66u);
+  EXPECT_EQ(spans[0].length, 2u);
+}
+
+TEST(Tokenizer, SpansOfNothingAreEmpty) {
+  EXPECT_TRUE(tokenize_spans("").empty());
+  EXPECT_TRUE(tokenize_spans(" !! ").empty());
+}
+
 }  // namespace
 }  // namespace mse

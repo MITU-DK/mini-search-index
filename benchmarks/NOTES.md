@@ -121,3 +121,53 @@ The term frequency adds one byte per posting while tf is below 128, which holds 
 dense lists settle near 2 bytes per posting. The commonest words go over it in long articles: `the`
 needs a second byte for tf in 32% of its postings, which is why it costs 2.32 bytes per posting and
 not 2. Rare terms cost 3 to 4 bytes because their gaps are large. Raw postings always cost 8.
+
+
+## B3: loading the index, `parse` vs `read` vs `mmap` (laptop, `main` index)
+
+Source: `benchmarks/results/laptop/b3_load-main.csv` (`tools/run_benchmarks.sh b3 --machine laptop
+--profile main`). The index is `data/index/main/vbyte.bin` (228 MiB, from B2). Every measurement is
+a fresh process; one discarded round first, then 5 runs per cell. The table shows medians and the
+min to max range of the two times. **Cold** means the file was evicted from the page cache with
+`posix_fadvise(DONTNEED)` just before opening; **warm** means it was already cached. The queries are
+the titles of 1000 random docs (seed 42), so "first query" is one fixed title, the same in every run.
+The time shown for a query is the search itself; the previews (snippets) are not included.
+
+| Cache | Mode | Open (ms) | Range | First query (ms) | Range | Open + first query (ms) | RSS after open (MiB) | RSS after 1000 queries (MiB) | Major faults, first query | Minor faults, first query |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| cold | parse | 1,282 | 1,227 to 1,343 | 0.808 | 0.776 to 0.853 | 1,283 | 816 | 819 | 0 | 313 |
+| cold | read | 253 | 247 to 256 | 0.689 | 0.656 to 1.25 | 254 | 233 | 236 | 0 | 310 |
+| cold | mmap | 0.537 | 0.513 to 0.674 | 11.9 | 10.8 to 15.4 | 12.4 | 4 | 127 | 32 | 321 |
+| warm | parse | 1,131 | 1,097 to 1,179 | 0.811 | 0.770 to 0.975 | 1,132 | 816 | 819 | 0 | 313 |
+| warm | read | 111 | 107 to 121 | 0.656 | 0.641 to 0.688 | 112 | 233 | 236 | 0 | 310 |
+| warm | mmap | 0.016 | 0.009 to 0.017 | 1.13 | 0.738 to 1.18 | 1.15 | 4 | 133 | 0 | 350 |
+
+### What the three modes show
+
+- **`parse` is slow because of decoding, not disk.** Opening takes 1,131 ms warm and 1,282 ms cold.
+  `read` also reads the whole file into memory and takes 111 ms warm, so decoding the postings into
+  hash maps costs about **1,020 ms**, which is 80% of the cold `parse` time. The disk
+  accounts for only about 151 ms (cold minus warm). `parse` also needs 812 MiB of memory,
+  3.6 times the size of the file, because hash maps and vectors take far more space than the
+  packed bytes.
+- **`read` is a plain copy.** It spends its 111 ms warm copying 228 MiB into a buffer and nothing
+  decoding. Cold, the disk adds about 142 ms. Its memory is the size of the file.
+- **`mmap` opens in 0.016 ms warm and 0.537 ms cold**, because opening only maps
+  the file and checks the header. Nothing is read until a query touches it, and the memory after opening
+  is 4 MiB (only the program itself).
+- **The cost moves to the first query.** Warm, the first `mmap` query takes 1.13 ms against
+  0.81 ms for `parse`, which is 0.32 ms more. Mapped pages that are already in the page cache still
+  have to be entered into this process's page table, one minor page fault each: 350
+  minor faults against 313 for `parse` (37 more; the rest is setup that every mode shares). Cold, the first
+  query takes **11.9 ms with 32 major faults**, because those pages must come from disk. The `parse` and `read` first
+  queries take under a millisecond, because everything is already in memory: they paid before the query, at open.
+- **Open plus first query**, which is how long a user waits for the first answer from a new process:
+  `mmap` 12.4 ms cold and 1.15 ms warm, `read` 254 ms and
+  112 ms, `parse` 1,283 ms and 1,132 ms.
+- **After 1000 queries** `mmap` has 133 MiB resident, all of it file pages that the
+  page cache shares with other processes, against 819 MiB of private memory for `parse`. 1000 random
+  title queries touch about 58% of the file, which is why the memory grows.
+
+Limits of these numbers: one index (the `main` corpus) on one laptop; the first query is a single title,
+so its cold time depends on which pages that title happens to need; eviction with `fadvise` drops this
+file only (not a full `drop_caches`); times are for the search only, without previews.

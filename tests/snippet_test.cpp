@@ -50,6 +50,8 @@ TEST(Snippet, ShortTextIsKeptWhole) {
   ASSERT_EQ(s.highlights.size(), 1u);
   EXPECT_EQ(highlighted(s, 0), "fox");
   EXPECT_EQ(s.highlights[0].offset, 16u);
+  EXPECT_FALSE(s.cut_before);  // the whole text fits, so nothing was cut off
+  EXPECT_FALSE(s.cut_after);
 }
 
 TEST(Snippet, WindowStarts40BytesBeforeTheFirstMatchAndIs160Long) {
@@ -60,12 +62,16 @@ TEST(Snippet, WindowStarts40BytesBeforeTheFirstMatchAndIs160Long) {
   ASSERT_EQ(s.highlights.size(), 1u);
   EXPECT_EQ(s.highlights[0].offset, 40u);
   EXPECT_EQ(highlighted(s, 0), "fox");
+  EXPECT_TRUE(s.cut_before);
+  EXPECT_TRUE(s.cut_after);
 }
 
 TEST(Snippet, NoMatchUsesTheStartOfTheText) {
   const Snippet s = make_snippet(std::string(300, 'x'), Terms{"fox"});
   EXPECT_EQ(s.text, std::string(160, 'x'));
   EXPECT_TRUE(s.highlights.empty());
+  EXPECT_FALSE(s.cut_before);
+  EXPECT_TRUE(s.cut_after);
 }
 
 TEST(Snippet, EmptyTextAndNoTerms) {

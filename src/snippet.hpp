@@ -24,6 +24,8 @@ struct Highlight {
 struct Snippet {
   std::string text;
   std::vector<Highlight> highlights;  // in order, never overlapping
+  bool cut_before = false;            // the doc text continues before the window
+  bool cut_after = false;             // the doc text continues after the window
 };
 
 // A window of kSnippetWindow bytes of `doc_text`, starting kSnippetLead bytes before the first

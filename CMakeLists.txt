@@ -29,5 +29,15 @@ add_library(mse_core STATIC ${MSE_CORE_SOURCES})
 target_include_directories(mse_core PUBLIC src)
 target_compile_options(mse_core PRIVATE ${MSE_WARNINGS})
 
+# The command-line code lives in a library so that the tests can call it too.
+add_library(mse_app STATIC app/cli.cpp)
+target_include_directories(mse_app PUBLIC app)
+target_link_libraries(mse_app PUBLIC mse_core)
+target_compile_options(mse_app PRIVATE ${MSE_WARNINGS})
+
+add_executable(msearch app/main.cpp)
+target_link_libraries(msearch PRIVATE mse_app)
+target_compile_options(msearch PRIVATE ${MSE_WARNINGS})
+
 enable_testing()
 add_subdirectory(tests)

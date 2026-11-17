@@ -96,7 +96,10 @@ Snippet make_snippet(std::string_view doc_text, std::span<const std::string> ter
     const bool inside = word->offset >= window.start && word->offset + word->length <= window.end;
     if (inside && is_match(*word)) marks.push_back(*word);
   }
-  return copy_window(doc_text, window, marks);
+  Snippet snippet = copy_window(doc_text, window, marks);
+  snippet.cut_before = window.start > 0;
+  snippet.cut_after = window.end < doc_text.size();
+  return snippet;
 }
 
 std::expected<Snippet, std::string> snippet_from_file(const std::filesystem::path& part_file,

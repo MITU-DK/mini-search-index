@@ -513,6 +513,100 @@ Measured, from the CSV:
   keeps its own term maps until the merge."""
 
 
+# ---------------------------------------------------------------- B8: bounded-memory build
+
+
+def section_b8(results, machine, profile):
+    rows = read_csv(results / f"b8_full-{profile}.csv")
+    groups = {}
+    for r in rows:
+        groups.setdefault((int(r["threads"]), int(r["budget_bytes"])), []).append(r)
+    groups = dict(sorted(groups.items()))
+    med = lambda rs, k: st.median(float(r[k]) for r in rs)
+    first = next(iter(groups.values()))
+    per_run = len(first)
+    docs = int(first[0]["docs"])
+    commits = sorted({r["commit"] for r in rows})
+    compared = [r for r in rows if r["identical_to_in_memory"] != "not_compared"]
+    same = sum(r["identical_to_in_memory"] == "yes" for r in compared)
+
+    # the in-memory build at the same thread count, from B1, where there is one
+    b1 = {}
+    b1_path = results / f"b1_build-{profile}.csv"
+    if b1_path.exists():
+        for r in read_csv(b1_path):
+            b1.setdefault(int(r["threads"]), []).append(r)
+
+    table_rows, peaks = [], {}
+    for (threads, budget), rs in groups.items():
+        total = med(rs, "total_s")
+        peak = med(rs, "peak_rss_kb") / 1024
+        pct = 100 * peak / (budget / MIB)
+        peaks[(threads, budget)] = pct
+        table_rows.append(
+            f"| {threads} | {budget // MIB:,} | {total:.2f} | {min(float(r['total_s']) for r in rs):.2f} to "
+            f"{max(float(r['total_s']) for r in rs):.2f} | {med(rs, 'tokenize_s'):.2f} | {med(rs, 'merge_s'):.2f} "
+            f"| {med(rs, 'write_s'):.2f} | {peak:,.0f} | {pct:.0f}% | {int(med(rs, 'runs_spilled'))} "
+            f"| {med(rs, 'spill_bytes') / MIB:,.0f} |"
+        )
+    within = [k for k, pct in peaks.items() if pct <= 100]
+    over = [k for k, pct in peaks.items() if pct > 100]
+    over_text = "; ".join(f"{t} threads, {b // MIB:,} MiB: {peaks[(t, b)]:.0f}%" for t, b in over)
+
+    vs_memory = []
+    for threads in sorted({t for t, _ in groups}):
+        if threads not in b1:
+            continue
+        in_memory = med(b1[threads], "total_s")
+        in_merge = med(b1[threads], "merge_s")
+        in_tokenize = med(b1[threads], "tokenize_s")
+        largest = max(b for t, b in groups if t == threads)
+        rs = groups[(threads, largest)]
+        vs_memory.append(
+            f"  - {threads} threads: in memory (B1) {in_memory:.2f} s in total, tokenize {in_tokenize:.2f} s, merge {in_merge:.2f} s; "
+            f"with a {largest // MIB:,} MiB budget {med(rs, 'total_s'):.2f} s ({med(rs, 'total_s') / in_memory:.2f} times), "
+            f"tokenize {med(rs, 'tokenize_s'):.2f} s, merge {med(rs, 'merge_s'):.2f} s."
+        )
+    vs_text = "\n".join(vs_memory)
+
+    return f"""## B8: bounded-memory build ({machine}, `{profile}` profile, {docs:,} docs)
+
+Source: `benchmarks/results/{machine}/b8_full-{profile}.csv` (`tools/run_benchmarks.sh b8 --machine {machine}
+--profile {profile}`; commit {', '.join(f'`{c}`' for c in commits)}). Every row of the CSV is one build with
+`msearch index --memory-budget`'s code path (`build_to_file`) in a fresh process, so the peak RSS (the
+process's high-water mark, `VmHWM`) is that build's alone; there are {per_run} builds per row below, and the table
+shows the median and the range of the total. No warm-up run and no cache eviction: the corpus was most likely
+in the page cache. The run files and the index were written to the same SSD that the corpus is on. Output
+goes to a file next to the existing in-memory index (B2), and the program compares the two byte for byte.
+
+| Threads | Budget (MiB) | Total (s) | Range | Tokenize (s) | Merge (s) | Write (s) | Peak RSS (MiB) | Peak / budget | Runs | Spilled (MiB) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+{chr(10).join(table_rows)}
+
+Measured, from the CSV:
+
+- **The file is the same.** {same} of {len(compared)} builds gave an index that is byte-identical to the
+  in-memory one built by B2, whatever the budget, the thread count and the number of runs.
+- **The peak is within the budget in {len(within)} of {len(groups)} settings.** {"Over it: " + over_text + "." if over else ""}
+  The budget pays first for the document table and for memory that each thread needs whatever it holds
+  (the batch it is reading, the tokenizer's scratch space, the allocator's slack); what is left is shared by the
+  workers. When that fixed part is larger than the budget there is nothing to share, the workers are given half
+  the budget, and the process is over it by the rest. So a budget has a lower limit that grows with the thread
+  count and the number of documents, and below it more threads do not help. This is how the code works, and the
+  CSV shows it; the size of each fixed part was estimated from exploratory runs that are not in the CSV.
+- **What it costs, in time.** Compared with the in-memory build at the same thread count, with the largest
+  budget tried:
+{vs_text}
+  The budgeted build's tokenize phase includes writing the runs, which is probably why it is a little longer.
+  Its merge is longer because one thread merges all the runs, where the in-memory merge works in parallel on
+  shards of the terms, and it takes longer when there are more runs (the table shows it for the smaller budgets).
+
+Limits: one machine; two thread counts and three budgets; {per_run} builds per setting; the corpus was
+probably cached; a budget smaller than the fixed part is not honoured; the fixed parts were set from `main` and
+are checked again on `full` only if B8 is run there.
+"""
+
+
 SECTIONS = {
     "b1": section_b1,
     "b2": section_b2,
@@ -521,6 +615,7 @@ SECTIONS = {
     "b5": section_b5,
     "b6": section_b6,
     "b7": section_b7,
+    "b8": section_b8,
 }
 
 

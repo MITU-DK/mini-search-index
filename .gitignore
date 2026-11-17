@@ -7,3 +7,4 @@ build/
 docs/DESIGN.md
 docs/PLAN.md
 docs/CODING_STYLE.md
+__pycache__/

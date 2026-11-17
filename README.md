@@ -20,6 +20,7 @@ Measured on: 12th Gen Intel(R) Core(TM) i7-12700H, 20 logical CPUs, 14Gi RAM, 7.
 | Corpus | 150,000 English Wikipedia articles, 1,513 MiB of text | B2 |
 | Index size | 236 MiB with gap + VByte postings (15.6% of the text), against 705 MiB (46.6%) with raw postings; 2.18 bytes per posting | B2 |
 | Indexing time | 26.7 s with 1 thread, 6.65 s with 14 threads (4.02x faster) | B1 |
+| Bounded-memory build | 10.4 s with 20 threads and a 1,024 MiB budget (`--memory-budget`), peak 867 MiB; the file is byte-identical to the in-memory build in 18 of 18 builds | B8 |
 | Opening the index | warm: `mmap` 0.016 ms, `read` 112 ms, `parse` 1,139 ms. Cold: `mmap` 0.842 ms, `read` 342 ms, `parse` 1,366 ms; but the first query after a cold `mmap` takes 20.8 ms (page faults), against 0.821 ms after a cold `parse` | B3 |
 | Memory after opening | 4 MiB with `mmap`, 816 MiB with `parse` | B3 |
 | Query latency (warm, one thread) | BM25 p50 0.097 ms, p95 2.14 ms; with result previews p50 0.518 ms, p95 2.57 ms | B4 |

@@ -390,3 +390,47 @@ for both sides; grep's times differ between words more than the identical amount
 suggest (517 to 1,628 ms) and the reason was not investigated: the median of 5 runs
 was taken for each word, but different words were measured minutes apart.
 <!-- END b5 -->
+
+<!-- BEGIN b8 -->
+## B8: bounded-memory build (laptop, `main` profile, 150,000 docs)
+
+Source: `benchmarks/results/laptop/b8_full-main.csv` (`tools/run_benchmarks.sh b8 --machine laptop
+--profile main`; commit `499593d`). Every row of the CSV is one build with
+`msearch index --memory-budget`'s code path (`build_to_file`) in a fresh process, so the peak RSS (the
+process's high-water mark, `VmHWM`) is that build's alone; there are 3 builds per row below, and the table
+shows the median and the range of the total. No warm-up run and no cache eviction: the corpus was most likely
+in the page cache. The run files and the index were written to the same SSD that the corpus is on. Output
+goes to a file next to the existing in-memory index (B2), and the program compares the two byte for byte.
+
+| Threads | Budget (MiB) | Total (s) | Range | Tokenize (s) | Merge (s) | Write (s) | Peak RSS (MiB) | Peak / budget | Runs | Spilled (MiB) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 256 | 13.82 | 13.59 to 14.03 | 9.43 | 3.40 | 0.84 | 267 | 104% | 48 | 743 |
+| 4 | 512 | 13.14 | 13.11 to 13.27 | 9.23 | 2.83 | 0.96 | 484 | 95% | 16 | 709 |
+| 4 | 1,024 | 12.79 | 12.73 to 16.16 | 9.10 | 2.58 | 0.93 | 993 | 97% | 8 | 694 |
+| 20 | 256 | 12.22 | 12.14 to 12.25 | 5.80 | 5.35 | 0.89 | 511 | 200% | 291 | 845 |
+| 20 | 512 | 11.28 | 11.18 to 11.39 | 5.78 | 4.44 | 0.90 | 661 | 129% | 143 | 795 |
+| 20 | 1,024 | 10.37 | 10.35 to 10.46 | 5.68 | 3.60 | 0.90 | 867 | 85% | 60 | 751 |
+
+Measured, from the CSV:
+
+- **The file is the same.** 18 of 18 builds gave an index that is byte-identical to the
+  in-memory one built by B2, whatever the budget, the thread count and the number of runs.
+- **The peak is within the budget in 3 of 6 settings.** Over it: 4 threads, 256 MiB: 104%; 20 threads, 256 MiB: 200%; 20 threads, 512 MiB: 129%.
+  The budget pays first for the document table and for memory that each thread needs whatever it holds
+  (the batch it is reading, the tokenizer's scratch space, the allocator's slack); what is left is shared by the
+  workers. When that fixed part is larger than the budget there is nothing to share, the workers are given half
+  the budget, and the process is over it by the rest. So a budget has a lower limit that grows with the thread
+  count and the number of documents, and below it more threads do not help. This is how the code works, and the
+  CSV shows it; the size of each fixed part was estimated from exploratory runs that are not in the CSV.
+- **What it costs, in time.** Compared with the in-memory build at the same thread count, with the largest
+  budget tried:
+  - 4 threads: in memory (B1) 10.47 s in total, tokenize 8.79 s, merge 1.38 s; with a 1,024 MiB budget 12.79 s (1.22 times), tokenize 9.10 s, merge 2.58 s.
+  - 20 threads: in memory (B1) 6.87 s in total, tokenize 5.08 s, merge 1.49 s; with a 1,024 MiB budget 10.37 s (1.51 times), tokenize 5.68 s, merge 3.60 s.
+  The budgeted build's tokenize phase includes writing the runs, which is probably why it is a little longer.
+  Its merge is longer because one thread merges all the runs, where the in-memory merge works in parallel on
+  shards of the terms, and it takes longer when there are more runs (the table shows it for the smaller budgets).
+
+Limits: one machine; two thread counts and three budgets; 3 builds per setting; the corpus was
+probably cached; a budget smaller than the fixed part is not honoured; the fixed parts were set from `main` and
+are checked again on `full` only if B8 is run there.
+<!-- END b8 -->

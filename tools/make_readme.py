@@ -27,6 +27,20 @@ def machine_line(folder):
             f"{info['kernel']}, {info['compiler'].split(' (')[0]} {info['compiler'].split()[-1]}")
 
 
+def b8_text(folder, profile):
+    """The largest budget at the most threads: how long it took, and how big the process got."""
+    rows = mr.read_csv(folder / f"b8_full-{profile}.csv")
+    threads = max(int(r["threads"]) for r in rows)
+    budget = max(int(r["budget_bytes"]) for r in rows if int(r["threads"]) == threads)
+    rs = [r for r in rows if int(r["threads"]) == threads and int(r["budget_bytes"]) == budget]
+    total = st.median(float(r["total_s"]) for r in rs)
+    peak = st.median(float(r["peak_rss_kb"]) for r in rs) / 1024
+    compared = [r for r in rows if r["identical_to_in_memory"] != "not_compared"]
+    same = sum(r["identical_to_in_memory"] == "yes" for r in compared)
+    return (f"{mr.fmt(total)} s with {threads} threads and a {budget // MIB:,} MiB budget (`--memory-budget`), "
+            f"peak {peak:,.0f} MiB; the file is byte-identical to the in-memory build in {same} of {len(compared)} builds")
+
+
 def headline(folder, profile):
     b2 = mr.read_csv(folder / f"b2_size-{profile}.csv")[0]
     corpus, vbyte, raw = int(b2["corpus_bytes"]), int(b2["vbyte_file_bytes"]), int(b2["raw_file_bytes"])
@@ -62,6 +76,8 @@ def headline(folder, profile):
         ("Indexing time",
          f"{f(one)} s with 1 thread, {f(med[best_t])} s with {best_t} threads "
          f"({one / med[best_t]:.2f}x faster)", "B1"),
+        ("Bounded-memory build",
+         b8_text(folder, profile), "B8"),
         ("Opening the index",
          f"warm: `mmap` {f(open_ms('warm', 'mmap'))} ms, `read` {f(open_ms('warm', 'read'))} ms, "
          f"`parse` {f(open_ms('warm', 'parse'))} ms. Cold: `mmap` {f(open_ms('cold', 'mmap'))} ms, "

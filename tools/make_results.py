@@ -151,6 +151,27 @@ def b7_table(folder, profile):
                    fmt(float(r["p50_us"])), fmt(float(r["p95_us"]))] for r in rows])
 
 
+def b8_table(folder, profile):
+    groups = {}
+    for r in read_csv(folder / f"b8_full-{profile}.csv"):
+        groups.setdefault((int(r["threads"]), int(r["budget_bytes"])), []).append(r)
+    rows = []
+    for (threads, budget), rs in sorted(groups.items()):
+        peak = st.median(float(r["peak_rss_kb"]) for r in rs) / 1024
+        same = sorted({r["identical_to_in_memory"] for r in rs})
+        rows.append([
+            threads, f"{budget // MIB:,}", med_range(r["total_s"] for r in rs),
+            fmt(st.median(float(r["tokenize_s"]) for r in rs)), fmt(st.median(float(r["merge_s"]) for r in rs)),
+            f"{peak:,.0f}", f"{100 * peak / (budget / MIB):.0f}%",
+            f"{st.median(float(r['runs_spilled']) for r in rs):.0f}",
+            f"{st.median(float(r['spill_bytes']) for r in rs) / MIB:,.0f}", "/".join(same),
+        ])
+    commits = sorted({r["commit"] for rs in groups.values() for r in rs})
+    return (table(["Threads", "Budget (MiB)", "Total s, median (min to max)", "Tokenize s", "Merge s",
+                   "Peak RSS (MiB)", "Peak / budget", "Runs", "Spilled (MiB)", "Same file as in-memory"], rows)
+            + f"\n\nCommit: {', '.join(f'`{c}`' for c in commits)}. {len(next(iter(groups.values())))} builds per row.")
+
+
 BENCHMARKS = [
     ("b1", "B1: indexing time and scaling", b1_table, "b1_build"),
     ("b2", "B2: index size", b2_table, "b2_size"),
@@ -159,6 +180,7 @@ BENCHMARKS = [
     ("b5", "B5: grep against the index", b5_table, "b5_grep"),
     ("b6", "B6: spell check", b6_table, "b6_spell"),
     ("b7", "B7: autocomplete", b7_table, "b7_suggest"),
+    ("b8", "B8: bounded-memory build", b8_table, "b8_full"),
 ]
 
 

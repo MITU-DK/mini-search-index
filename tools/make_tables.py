@@ -303,7 +303,150 @@ made from, which is not always the word a person meant.
 """
 
 
-SECTIONS = {"b2": section_b2, "b3": section_b3, "b6": section_b6, "b7": section_b7}
+# ---------------------------------------------------------------- B4: query latency and quality
+
+
+def section_b4(results, machine, profile):
+    latency = read_csv(results / f"b4_query-{profile}.csv")
+    quality = {r["mode"]: r for r in read_csv(results / f"b4_quality-{profile}.csv")}
+    rows = "\n".join(
+        f"| {r['cache']} | {r['mode']} | {fmt(float(r['p50_ms']))} | {fmt(float(r['p95_ms']))} "
+        f"| {fmt(float(r['p99_ms']))} | {fmt(float(r['mean_ms']))} | {fmt(float(r['max_ms']))} "
+        f"| {r['major_faults']} |"
+        for r in latency
+    )
+    pick = lambda cache, mode: next(r for r in latency if r["cache"] == cache and r["mode"] == mode)
+    warm, cold = pick("warm", "bm25"), pick("cold", "bm25")
+    snippets = pick("warm", "bm25+snippets")
+    bm, tf = quality["bm25"], quality["tfidf"]
+    n = int(bm["queries"])
+    pct = lambda r, k: f"{100 * float(r[k]):.1f}%"
+    return f"""## B4: query latency and ranking quality ({machine}, `{profile}` index)
+
+Source: `benchmarks/results/{machine}/b4_query-{profile}.csv` and `b4_quality-{profile}.csv`
+(`tools/run_benchmarks.sh b4 --machine {machine} --profile {profile}`). The queries are the titles of
+{n} random docs (seed 42, in `benchmarks/queries/known_item-{profile}.tsv`), and the answer to each is
+the doc the title came from ("known-item" search). Top 10 results, no spell correction in the quality
+run. Titles are indexed, so each query is a title that the answer contains: this makes the task easier
+than real search, but it is a fair way to compare two rankings.
+
+### Latency
+
+Times are for one `search()` call in milliseconds, except `bm25+snippets`, which also reads the
+corpus and builds the preview of each of the 10 hits, as the command line does. **Warm**: the index
+and the corpus are in the page cache; one unrecorded pass, then 5 recorded passes ({n * 5} timings per
+row). **Cold**: the index file was evicted just before the process opened it, one pass of {n} queries,
+one fresh process per mode; it is not repeated, so a cold row is one run. The last column counts major
+page faults during the recorded queries (0 warm; above 0 cold, which is how the eviction is checked).
+Percentiles are nearest-rank.
+
+| Cache | Mode | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | max (ms) | Major faults |
+|---|---|---:|---:|---:|---:|---:|---:|
+{rows}
+
+- Warm BM25: **p50 {fmt(float(warm['p50_ms']))} ms, p95 {fmt(float(warm['p95_ms']))} ms, p99
+  {fmt(float(warm['p99_ms']))} ms**. The mean ({fmt(float(warm['mean_ms']))} ms) is {float(warm['mean_ms']) / float(warm['p50_ms']):.1f}
+  times the median, so a minority of queries are much slower than the typical one; the likely cause is
+  titles with a common word, whose postings are long (not broken down by query).
+- Cold, the first pass over the index costs more: p50 {fmt(float(cold['p50_ms']))} ms and p99
+  {fmt(float(cold['p99_ms']))} ms, because each new page of postings is read from disk
+  ({cold['major_faults']} major faults over the pass).
+- Previews add {fmt(float(snippets['p50_ms']) - float(warm['p50_ms']))} ms at the median (p50 {fmt(float(snippets['p50_ms']))} ms
+  against {fmt(float(warm['p50_ms']))} ms), the cost of reading ten lines from the corpus.
+- TF-IDF is a little slower than BM25 here. That is probably this implementation (it calls `log` for
+  every posting where BM25 does plain arithmetic) and not a property of the ranking; it was not
+  investigated.
+
+### Quality
+
+| Ranking | MRR@10 | Hit@1 | Hit@10 | Mean length of the doc ranked first (tokens) |
+|---|---:|---:|---:|---:|
+| BM25 | {float(bm['mrr_at_10']):.3f} | {pct(bm, 'hit_at_1')} | {pct(bm, 'hit_at_10')} | {float(bm['mean_len_first_hit']):,.0f} |
+| TF-IDF | {float(tf['mrr_at_10']):.3f} | {pct(tf, 'hit_at_1')} | {pct(tf, 'hit_at_10')} | {float(tf['mean_len_first_hit']):,.0f} |
+
+The average length of the target docs is {float(bm['mean_len_target']):,.0f} tokens. BM25's first
+result is about as long ({float(bm['mean_len_first_hit']):,.0f}), TF-IDF's is
+{float(tf['mean_len_first_hit']) / float(bm['mean_len_target']):.1f} times as long ({float(tf['mean_len_first_hit']):,.0f}).
+
+**Why BM25 beats TF-IDF here.** The TF-IDF score used here, the sum of (1 + ln tf) x ln(N/df), has no
+document length in it: a long article has more chances to contain each query word, and so scores
+higher than a short one that is about the title. BM25 divides the term frequency by a factor that
+grows with the length of the doc (b = 0.75), which cancels most of that advantage. The measurement
+above fits this: the docs that TF-IDF puts first are about three times longer than the targets, while
+BM25's are the same length. This explains the direction and size of the gap; it was not tested by
+adding length normalisation to TF-IDF, which would be the direct check.
+
+Limits: one index, one machine; known-item queries made from titles (the doc always contains every
+query word, which real queries do not guarantee); a title shared by two docs makes only one of them
+the right answer; cold rows are single runs.
+"""
+
+
+# ---------------------------------------------------------------- B5: grep
+
+
+def section_b5(results, machine, profile):
+    rows = read_csv(results / f"b5_grep-{profile}.csv")
+    summary = read_csv(results / f"b5_breakeven-{profile}.csv")[0]
+    table = "\n".join(
+        f"| `{r['term']}` | {int(r['df']):,} | {int(r['grep_docs']):,} | {fmt(float(r['grep_ms']))} "
+        f"| {fmt(float(r['index_ms']))} | {float(r['speedup']):.0f}x |"
+        for r in rows
+    )
+    differ = [r for r in rows if r["df"] != r["grep_docs"]]
+    unexplained = [r for r in differ if r["df"] != r["tokenizer_regex_docs"]]
+    speedups = [float(r["speedup"]) for r in rows]
+    grep_times = [float(r["grep_ms"]) for r in rows]
+    index_times = [float(r["index_ms"]) for r in rows]
+    differ_text = ", ".join(f"`{r['term']}` ({int(r['grep_docs']) - int(r['df'])} more)" for r in differ)
+    return f"""## B5: grep against the index ({machine}, `{profile}` index)
+
+Source: `benchmarks/results/{machine}/b5_grep-{profile}.csv` and `b5_breakeven-{profile}.csv`
+(`tools/run_benchmarks.sh b5 --machine {machine} --profile {profile}`, which runs `tools/bench_grep.sh`).
+20 single words picked by seed from three bands of document frequency (`benchmarks/queries/grep_terms-{profile}.txt`):
+5 rare (10 to 50 docs), 10 medium (0.1% to 1% of the docs) and 5 very common (over 20%).
+grep is `LC_ALL=C grep -cwiF` over every part file, with the counts summed (one doc is one line);
+the index side is `msearch query -i index.bin --count-only <word>`. Both are whole processes timed
+the same way, 5 runs after one unrecorded run, median; the corpus and the index were in the page cache.
+
+| Word | Docs (index) | Docs (grep) | grep (ms) | Index (ms) | Speed-up |
+|---|---:|---:|---:|---:|---:|
+{table}
+
+- grep takes {fmt(min(grep_times))} to {fmt(max(grep_times))} ms per word whatever the word, because it reads
+  the whole corpus every time; the index takes {fmt(min(index_times))} to {fmt(max(index_times))} ms, most
+  of it the start of the process. The speed-up is **{min(speedups):.0f}x to {max(speedups):.0f}x**, median
+  {st.median(speedups):.0f}x.
+- **Break-even.** Building the index takes {float(summary['build_s']):.1f} s at the fastest thread
+  count in B1 ({summary['threads']} threads). A grep costs {fmt(float(summary['grep_ms_mean']))} ms on
+  average and an indexed query {fmt(float(summary['index_ms_mean']))} ms, so the build is paid back after
+  **{float(summary['break_even_queries']):.1f} queries**. This compares a count of one word; a ranked
+  search does more work than a count, so the real figure is a little higher.
+- **The counts.** grep and the index agree on {len(rows) - len(differ)} of {len(rows)} words. The
+  {len(differ)} that differ are {differ_text}: grep finds a few more docs in every case. The reason is
+  the rule for what a word is. `grep -w` in the C locale treats bytes of 0x80 and above (any
+  non-ASCII character) as separators, so it finds `births` in "births–deaths" with an en dash; the
+  tokenizer treats those bytes as part of a word, so for the index that word is `births–deaths` and not
+  `births`. (`grep -w` also treats `_` as a word character, which goes the other way.) The last column
+  of the CSV counts the docs with a regular expression that follows the tokenizer's rule, and it equals the
+  index's count for {"all" if not unexplained else "not all"} {len(rows)} words, so the difference is explained by those rules and
+  nothing else.
+
+Limits: single-word counts only (grep cannot rank); one machine; the timings include process start
+for both sides; grep times vary more between words than the work would suggest ({fmt(min(grep_times))}
+to {fmt(max(grep_times))} ms for the same amount of data), which is probably the machine, not the word:
+the median of 5 runs was taken for each, but the runs of different words are minutes apart.
+"""
+
+
+SECTIONS = {
+    "b2": section_b2,
+    "b3": section_b3,
+    "b4": section_b4,
+    "b5": section_b5,
+    "b6": section_b6,
+    "b7": section_b7,
+}
 
 
 def replace_section(text, key, body):

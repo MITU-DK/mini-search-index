@@ -26,6 +26,7 @@ constexpr std::string_view kUsage =
     "  msearch query --corpus <dir> [--threads N|auto] [--rank bm25|tfidf] [-k N] <text>...\n"
     "  msearch query -i <index.bin> [--load mmap|read] [--corpus <dir>] [--rank ...] [-k N] "
     "<text>...\n"
+    "  msearch query -i <index.bin> --count-only <word>\n"
     "  msearch search -i <index.bin> [--load mmap|read] [--corpus <dir>] [--rank ...] [-k N]\n"
     "  msearch --help\n"
     "\n"
@@ -209,18 +210,36 @@ std::expected<Index, std::string> open_saved_index(const QueryArgs& args, std::o
   return index;
 }
 
+// --count-only: the number of docs that contain the one word of `text`, and nothing else.
+int print_document_frequency(const IndexView& view, std::string_view text, std::ostream& out,
+                             std::ostream& err) {
+  const std::vector<std::string> words = unique_query_terms(text);
+  if (words.size() != 1) {
+    err << "error: --count-only needs exactly one word\n";
+    return 1;
+  }
+  const auto term = view.find_term(words[0]);
+  out << (term ? view.df_at(*term) : 0u) << "\n";
+  return 0;
+}
+
 int query_saved_index(const QueryArgs& args, std::ostream& out, std::ostream& err, bool color) {
   const auto index = open_saved_index(args, err);
   if (!index) {
     err << "error: " << index.error() << "\n";
     return 1;
   }
+  if (args.count_only) return print_document_frequency(index->view(), args.text, out, err);
   Searcher<IndexView> searcher(index->view());
   out << answer(index->view(), searcher, args, args.text, args.corpus.string(), color);
   return 0;
 }
 
 int run_query(const QueryArgs& args, std::ostream& out, std::ostream& err, bool color) {
+  if (args.count_only && args.index.empty()) {
+    err << "error: --count-only needs a saved index (-i)\n";
+    return 1;
+  }
   return args.index.empty() ? query_in_memory(args, out, err, color)
                             : query_saved_index(args, out, err, color);
 }
@@ -295,6 +314,8 @@ std::expected<QueryArgs, std::string> parse_query_args(std::span<const std::stri
       words.push_back(arg);
     } else if (arg == "--") {
       only_words_left = true;
+    } else if (arg == "--count-only") {
+      parsed.count_only = true;
     } else {
       if (!is_query_option(arg))
         return std::unexpected("unknown option \"" + std::string(arg) + "\"");

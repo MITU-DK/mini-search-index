@@ -4,14 +4,18 @@
 #   tools/run_benchmarks.sh b1 --machine laptop --profile main [--threads 1,2,4 | auto] [--repeat 5]
 #   tools/run_benchmarks.sh b2 --machine laptop --profile main
 #   tools/run_benchmarks.sh b3 --machine laptop --profile main [--repeat 5]   (needs b2 first)
+#   tools/run_benchmarks.sh b4 --machine laptop --profile main                (needs b2 first)
+#   tools/run_benchmarks.sh b5 --machine laptop --profile main                (needs b2 and b1)
 #   tools/run_benchmarks.sh b6 --machine laptop --profile main                (needs b2 first)
 #   tools/run_benchmarks.sh b7 --machine laptop --profile main                (needs b2 first)
+#
+#   tools/run_benchmarks.sh all --machine laptop --profile main               (b2, then the rest)
 #
 # Each thread count runs in a fresh process, so peak memory is not carried over from a
 # previous one. The CSV of the benchmark is started again (not appended to) on every invocation.
 set -euo pipefail
 
-usage() { echo "usage: $0 <b1|b2|b3|b6|b7> --machine M --profile P [--threads SWEEP] [--repeat N]" >&2; exit 2; }
+usage() { echo "usage: $0 <b1|b2|b3|b4|b5|b6|b7|all> --machine M --profile P [--threads SWEEP] [--repeat N]" >&2; exit 2; }
 
 [ $# -ge 1 ] || usage
 benchmark=$1
@@ -32,11 +36,21 @@ done
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 cd "$root"
+
+if [ "$benchmark" = all ]; then
+  # b2 first: it writes the index files that the others read. b5 needs the build time from b1.
+  for each in b2 b1 b3 b4 b5 b6 b7; do
+    echo "==== $each ===="
+    "$0" "$each" --machine "$machine" --profile "$profile" --threads "$threads" --repeat "$repeat"
+  done
+  exit 0
+fi
 corpus="data/corpus/$profile"
 [ -d "$corpus" ] || { echo "error: $corpus does not exist (run tools/fetch_wikipedia.sh and tools/prepare_corpus.py)" >&2; exit 1; }
 
 commit=$(git rev-parse --short HEAD)
-git diff --quiet HEAD -- || commit="$commit-dirty"
+# The results folder changes during a run (earlier benchmarks write CSVs), so it does not count.
+git diff --quiet HEAD -- . ':!benchmarks/results' || commit="$commit-dirty"
 
 cmake --preset release >/dev/null
 cmake --build --preset release --target msearch-bench >/dev/null
@@ -60,10 +74,10 @@ case $benchmark in
     ;;
   b3)
     index="data/index/$profile/vbyte.bin"
-    queries="data/index/$profile/queries.txt"
+    queries="benchmarks/queries/known_item-$profile.tsv"
     [ -f "$index" ] || { echo "error: $index is missing; run b2 first" >&2; exit 1; }
-    # Known-item queries (DESIGN.md §11): the titles of 1000 random docs, seed 42.
-    [ -f "$queries" ] || "$bench" queries --index "$index" --count 1000 --seed 42 --out "$queries"
+    # Known-item queries (DESIGN.md §11): the titles of 1000 random docs, seed 42. Kept in git.
+    [ -f "$queries" ] || "$bench" gen-queries --index "$index" --n 1000 --seed 42 --out "$queries"
 
     csv="$out/b3_load-$profile.csv"
     rm -f "$csv"
@@ -90,6 +104,33 @@ case $benchmark in
       exit 1
     }
     echo "wrote $csv"
+    ;;
+  b4)
+    index="data/index/$profile/vbyte.bin"
+    queries="benchmarks/queries/known_item-$profile.tsv"
+    [ -f "$index" ] || { echo "error: $index is missing; run b2 first" >&2; exit 1; }
+    [ -f "$queries" ] || "$bench" gen-queries --index "$index" --n 1000 --seed 42 --out "$queries"
+
+    # Quality does not depend on timing, so it runs once.
+    "$bench" quality --index "$index" --queries "$queries" --machine "$machine" --profile "$profile"
+
+    csv="$out/b4_query-$profile.csv"
+    rm -f "$csv"
+    # Warm: the index and the corpus (for the snippets) are in the page cache. One process runs
+    # every mode: an unrecorded pass, then 5 recorded ones.
+    cat "$index" "$corpus"/part-*.tsv > /dev/null
+    "$bench" queries --index "$index" --queries "$queries" --cache warm \
+      --machine "$machine" --profile "$profile" --corpus "$corpus"
+    # Cold: the index file is evicted from the page cache first, and each mode gets its own fresh
+    # process, because the pages one mode touches are warm for the next.
+    for mode in bm25 tfidf; do
+      "$bench" queries --index "$index" --queries "$queries" --cache cold --modes "$mode" \
+        --machine "$machine" --profile "$profile"
+    done
+    echo "wrote $csv"
+    ;;
+  b5)
+    tools/bench_grep.sh --machine "$machine" --profile "$profile"
     ;;
   b6)
     index="data/index/$profile/vbyte.bin"

@@ -455,5 +455,31 @@ TEST(Cli, MisspelledQueryOnASavedIndexShowsTheCorrection) {
   EXPECT_EQ(fine.out.find("Showing results for"), std::string::npos) << fine.out;
 }
 
+TEST(Cli, CountOnlyPrintsTheDocumentFrequencyOfOneWord) {
+  TempDir dir;
+  const std::string index = fixture_index(dir);
+  const CliRun two =
+      run({"query", "-i", index, "--count-only", "Machine"});  // case does not matter
+  EXPECT_EQ(two.code, 0) << two.err;
+  EXPECT_EQ(two.out, "2\n");
+  const CliRun none = run({"query", "-i", index, "--count-only", "zebra"});
+  EXPECT_EQ(none.code, 0) << none.err;
+  EXPECT_EQ(none.out, "0\n");
+  // the flag may come anywhere, and it takes no value
+  EXPECT_EQ(run({"query", "--count-only", "-i", index, "learning"}).out, "2\n");
+}
+
+TEST(Cli, CountOnlyNeedsExactlyOneWordAndASavedIndex) {
+  TempDir dir;
+  const std::string index = fixture_index(dir);
+  const CliRun many = run({"query", "-i", index, "--count-only", "machine", "learning"});
+  EXPECT_EQ(many.code, 1);
+  EXPECT_NE(many.err.find("--count-only"), std::string::npos) << many.err;
+  const CliRun built =
+      run({"query", "--corpus", tiny_corpus_dir().string(), "--count-only", "fox"});
+  EXPECT_EQ(built.code, 1);
+  EXPECT_NE(built.err.find("--count-only"), std::string::npos) << built.err;
+}
+
 }  // namespace
 }  // namespace mse

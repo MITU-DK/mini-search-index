@@ -6,8 +6,15 @@
 //   msearch-bench build --corpus D --threads <sweep> --repeat N --machine M --profile P
 //                       --commit H [--results DIR]
 //
-//   msearch-bench queries --index F --count N --seed S --out FILE
-//                                                 known-item queries: the titles of N random docs
+//   msearch-bench gen-queries --index F --n N --seed S --out FILE
+//                                                 known-item queries: "doc<TAB>title" of N random
+//                                                 docs
+//   msearch-bench queries --index F --queries Q --cache warm|cold [--modes bm25,tfidf,...]
+//                         --machine M --profile P     query latency (B4); adds rows to the CSV
+//   msearch-bench quality --index F --queries Q --machine M --profile P
+//                                                 MRR and hits of BM25 vs TF-IDF (B4)
+//   msearch-bench pick-grep-terms --index F --seed S --out FILE
+//                                                 20 words of three document-frequency bands (B5)
 //   msearch-bench suggest --index F --n N --seed S --machine M --profile P
 //                                                 autocomplete: sorted table vs trie (B7)
 //   msearch-bench gen-typos --index F --n N --seed S --out FILE
@@ -43,6 +50,7 @@
 #include "parsed_loader.hpp"
 #include "procstats.hpp"
 #include "searcher.hpp"
+#include "snippet.hpp"
 #include "spellcheck.hpp"
 #include "stats.hpp"
 #include "thread_sweep.hpp"
@@ -257,29 +265,51 @@ int command_size(const Options& options) {
 
 // ---- queries and load measurements ----
 
-int command_queries(const Options& options) {
+// A known-item query: the title of one doc, which is the answer.
+struct KnownItem {
+  uint32_t doc;
+  std::string title;
+};
+
+// The titles of `count` docs picked with raw mt19937 output and modulo (portable), one per line
+// as "doc_id<TAB>title".
+int command_gen_queries(const Options& options) {
   auto index = mse::Index::open(need(options, "index"), mse::LoadMode::Mmap);
   if (!index) throw std::runtime_error(index.error());
   const mse::IndexView& view = index->view();
   if (view.num_docs() == 0) throw std::runtime_error("the index has no docs to take queries from");
 
-  const unsigned count = parse_repeat(need(options, "count"));
-  std::mt19937 rng(static_cast<uint32_t>(std::stoul(need(options, "seed"))));
-  std::ofstream out(need(options, "out"), std::ios::trunc);
+  const unsigned count = parse_repeat(get_or(options, "n", "1000"));
+  std::mt19937 rng(static_cast<uint32_t>(std::stoul(get_or(options, "seed", "42"))));
+  const std::filesystem::path out_path = need(options, "out");
+  if (out_path.has_parent_path()) std::filesystem::create_directories(out_path.parent_path());
+  std::ofstream out(out_path, std::ios::trunc);
   for (unsigned i = 0; i < count; ++i) {
-    out << view.doc_title(static_cast<uint32_t>(rng() % view.num_docs())) << '\n';
+    const auto doc = static_cast<uint32_t>(rng() % view.num_docs());
+    out << doc << '\t' << view.doc_title(doc) << '\n';
   }
-  if (!out) throw std::runtime_error("cannot write " + need(options, "out"));
+  if (!out) throw std::runtime_error("cannot write " + out_path.string());
+  std::cerr << "wrote " << out_path.string() << "\n";
   return 0;
 }
 
-std::vector<std::string> read_queries(const std::string& path) {
+std::vector<KnownItem> read_known_items(const std::string& path) {
   std::ifstream in(path);
   if (!in) throw std::runtime_error("cannot read " + path);
-  std::vector<std::string> queries;
-  for (std::string line; std::getline(in, line);) queries.push_back(line);
-  if (queries.empty()) throw std::runtime_error(path + " has no queries");
-  return queries;
+  std::vector<KnownItem> items;
+  for (std::string line; std::getline(in, line);) {
+    const std::size_t tab = line.find('\t');
+    if (tab == std::string::npos) throw std::runtime_error("bad line in " + path + ": " + line);
+    items.push_back({static_cast<uint32_t>(std::stoul(line.substr(0, tab))), line.substr(tab + 1)});
+  }
+  if (items.empty()) throw std::runtime_error(path + " has no queries");
+  return items;
+}
+
+std::vector<std::string> read_queries(const std::string& path) {
+  std::vector<std::string> titles;
+  for (KnownItem& item : read_known_items(path)) titles.push_back(std::move(item.title));
+  return titles;
 }
 
 constexpr std::size_t kLoadQueries = 1000;
@@ -626,6 +656,218 @@ int command_spell(const Options& options) {
   return 0;
 }
 
+// ---- B4: query latency and quality ----
+
+mse::RankMode parse_rank_mode(std::string_view name) {
+  if (name == "bm25") return mse::RankMode::BM25;
+  if (name == "tfidf") return mse::RankMode::TFIDF;
+  throw std::invalid_argument("unknown ranking \"" + std::string(name) + "\"");
+}
+
+std::vector<std::string> split_commas(std::string_view text) {
+  std::vector<std::string> parts;
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    const std::size_t comma = std::min(text.find(',', start), text.size());
+    parts.emplace_back(text.substr(start, comma - start));
+    start = comma + 1;
+  }
+  return parts;
+}
+
+constexpr std::size_t kLatencyPasses = 5;
+constexpr std::size_t kTopTen = 10;
+constexpr std::string_view kQueryHeader =
+    "cache,mode,p50_ms,p95_ms,p99_ms,mean_ms,max_ms,major_faults\n";
+
+// One pass over the queries; every query's time in milliseconds. `snippets` also reads and builds
+// the preview of every hit, as the command line does.
+std::vector<double> time_pass(mse::Searcher<mse::IndexView>& searcher, const mse::IndexView& view,
+                              const std::vector<KnownItem>& items, mse::RankMode mode,
+                              bool snippets, const std::string& corpus, std::size_t& sink) {
+  std::vector<double> milliseconds;
+  milliseconds.reserve(items.size());
+  for (const KnownItem& item : items) {
+    const auto start = std::chrono::steady_clock::now();
+    const mse::SearchResponse response = searcher.search(item.title, {.k = kTopTen, .mode = mode});
+    sink += response.hits.size();
+    if (snippets) {
+      for (const mse::SearchResult& hit : response.hits) {
+        const auto snippet = mse::snippet_for(view, hit.doc, response.terms, corpus);
+        if (snippet) sink += snippet->text.size();
+      }
+    }
+    milliseconds.push_back(milliseconds_since(start));
+  }
+  return milliseconds;
+}
+
+int command_query_latency(const Options& options) {
+#ifndef NDEBUG
+  std::cerr << "error: this is not a release build; its numbers would mean nothing.\n";
+  return 1;
+#endif
+  const std::filesystem::path index_path = need(options, "index");
+  const std::string cache = need(options, "cache");
+  const std::string profile = need(options, "profile");
+  if (cache != "cold" && cache != "warm")
+    throw std::invalid_argument("--cache must be cold or warm");
+  const std::vector<KnownItem> items = read_known_items(need(options, "queries"));
+  const std::vector<std::string> modes =
+      split_commas(get_or(options, "modes", cache == "warm" ? "bm25,tfidf,bm25+snippets" : "bm25"));
+  if (cache == "cold" && modes.size() != 1) {
+    // Once a mode has run, the pages it touched are mapped and warm; one fresh process per mode.
+    throw std::invalid_argument("a cold run measures one mode, in its own process");
+  }
+  if (cache == "cold" && modes[0] == "bm25+snippets") {
+    throw std::invalid_argument("snippets are measured warm only");
+  }
+  const std::string corpus = get_or(options, "corpus", "data/corpus/" + profile);
+
+  if (cache == "cold") {
+    const auto evicted = mse::evict_from_page_cache(index_path);
+    if (!evicted) throw std::runtime_error(evicted.error());
+  }
+  const auto index = mse::Index::open(index_path, mse::LoadMode::Mmap);
+  if (!index) throw std::runtime_error(index.error());
+  const mse::IndexView& view = index->view();
+  mse::Searcher<mse::IndexView> searcher(view);
+
+  const std::filesystem::path csv_path =
+      std::filesystem::path(get_or(options, "results", "benchmarks/results")) /
+      need(options, "machine") / ("b4_query-" + profile + ".csv");
+  std::ofstream csv = open_csv(csv_path, kQueryHeader);
+  std::size_t sink = 0;
+  for (const std::string& name : modes) {
+    const bool snippets = name == "bm25+snippets";
+    const mse::RankMode mode = parse_rank_mode(snippets ? "bm25" : name);
+    std::vector<double> milliseconds;
+    uint64_t major_faults = 0;  // during the recorded passes
+    if (cache == "warm") {
+      (void)time_pass(searcher, view, items, mode, snippets, corpus, sink);  // not recorded
+      const uint64_t faults_before = mse::read_proc_stats().major_faults;
+      for (std::size_t pass = 0; pass < kLatencyPasses; ++pass) {
+        const auto times = time_pass(searcher, view, items, mode, snippets, corpus, sink);
+        milliseconds.insert(milliseconds.end(), times.begin(), times.end());
+      }
+      major_faults = mse::read_proc_stats().major_faults - faults_before;
+    } else {
+      const uint64_t faults_before = mse::read_proc_stats().major_faults;
+      milliseconds = time_pass(searcher, view, items, mode, false, corpus, sink);
+      major_faults = mse::read_proc_stats().major_faults - faults_before;
+      // A cold number means nothing if the eviction did not work (DESIGN.md §10.5).
+      if (major_faults == 0) {
+        throw std::runtime_error(
+            "a cold run had no major page faults: the page cache was not "
+            "evicted, so its numbers cannot be trusted");
+      }
+    }
+    csv << cache << ',' << name << ',' << mse::percentile(milliseconds, 50) << ','
+        << mse::percentile(milliseconds, 95) << ',' << mse::percentile(milliseconds, 99) << ','
+        << mse::mean(milliseconds) << ','
+        << *std::max_element(milliseconds.begin(), milliseconds.end()) << ',' << major_faults
+        << '\n';
+  }
+  if (sink == 0) throw std::runtime_error("no query found anything");  // also keeps `sink` used
+  if (!csv) throw std::runtime_error("cannot write " + csv_path.string());
+  std::cerr << "wrote " << csv_path.string() << " (" << cache << ")\n";
+  return 0;
+}
+
+int command_quality(const Options& options) {
+  const auto index = mse::Index::open(need(options, "index"), mse::LoadMode::Mmap);
+  if (!index) throw std::runtime_error(index.error());
+  const mse::IndexView& view = index->view();
+  const std::vector<KnownItem> items = read_known_items(need(options, "queries"));
+  mse::Searcher<mse::IndexView> searcher(view);
+
+  const std::filesystem::path csv_path =
+      std::filesystem::path(get_or(options, "results", "benchmarks/results")) /
+      need(options, "machine") / ("b4_quality-" + need(options, "profile") + ".csv");
+  std::filesystem::create_directories(csv_path.parent_path());
+  std::ofstream csv(csv_path, std::ios::trunc);
+  csv << "mode,mrr_at_10,hit_at_1,hit_at_10,queries,mean_len_first_hit,mean_len_target\n";
+  for (const std::string name : {"bm25", "tfidf"}) {
+    std::vector<std::optional<std::size_t>> ranks;  // 1-based, nullopt: not in the top 10
+    std::size_t first = 0;
+    std::size_t found = 0;
+    double first_hit_length = 0;  // total length, in tokens, of the docs ranked first
+    double target_length = 0;
+    for (const KnownItem& item : items) {
+      const auto response = searcher.search(
+          item.title, {.k = kTopTen, .mode = parse_rank_mode(name), .spellcheck = false});
+      std::optional<std::size_t> rank;
+      for (std::size_t i = 0; i < response.hits.size(); ++i) {
+        if (response.hits[i].doc == item.doc) rank = i + 1;
+      }
+      ranks.push_back(rank);
+      target_length += view.doc_length(item.doc);
+      if (!response.hits.empty()) first_hit_length += view.doc_length(response.hits[0].doc);
+      first += rank == 1;
+      found += rank.has_value();
+    }
+    const auto share = [&](std::size_t n) {
+      return static_cast<double>(n) / static_cast<double>(items.size());
+    };
+    csv << name << ',' << mse::mean_reciprocal_rank(ranks) << ',' << share(first) << ','
+        << share(found) << ',' << items.size() << ','
+        << first_hit_length / static_cast<double>(items.size()) << ','
+        << target_length / static_cast<double>(items.size()) << '\n';
+  }
+  if (!csv) throw std::runtime_error("cannot write " + csv_path.string());
+  std::cerr << "wrote " << csv_path.string() << "\n";
+  return 0;
+}
+
+// ---- B5: terms for the grep comparison ----
+
+// 20 single words of plain lowercase letters, picked by seed from three bands of document
+// frequency: 5 rare (10 to 50 docs), 10 medium (0.1% to 1% of the docs) and 5 very common (over
+// 20%).
+int command_pick_grep_terms(const Options& options) {
+  const auto index = mse::Index::open(need(options, "index"), mse::LoadMode::Mmap);
+  if (!index) throw std::runtime_error(index.error());
+  const mse::IndexView& view = index->view();
+  const double docs = view.num_docs();
+
+  struct Band {
+    const char* name;
+    double low;
+    double high;
+    unsigned count;
+  };
+  const Band bands[] = {{"rare", 10, 50, 5},
+                        {"medium", docs * 0.001, docs * 0.01, 10},
+                        {"common", docs * 0.2, docs, 5}};
+  std::mt19937 rng(static_cast<uint32_t>(std::stoul(get_or(options, "seed", "42"))));
+  const std::filesystem::path out_path = need(options, "out");
+  if (out_path.has_parent_path()) std::filesystem::create_directories(out_path.parent_path());
+  std::ofstream out(out_path, std::ios::trunc);
+  for (const Band& band : bands) {
+    std::vector<uint32_t> candidates;
+    for (uint32_t i = 0; i < view.num_terms(); ++i) {
+      const std::string_view term = view.term_at(i);
+      if (term.size() >= 3 && is_plain_word(term) && view.df_at(i) >= band.low &&
+          view.df_at(i) <= band.high) {
+        candidates.push_back(i);
+      }
+    }
+    if (candidates.size() < band.count) {
+      throw std::runtime_error(std::string("too few ") + band.name + " words in the index");
+    }
+    for (unsigned made = 0; made < band.count; ++made) {  // a partial shuffle
+      const std::size_t pick = made + rng() % (candidates.size() - made);
+      std::swap(candidates[made], candidates[pick]);
+      out << view.term_at(candidates[made]) << '\n';
+      std::cerr << band.name << ": " << view.term_at(candidates[made]) << " (df "
+                << view.df_at(candidates[made]) << ")\n";
+    }
+  }
+  if (!out) throw std::runtime_error("cannot write " + out_path.string());
+  std::cerr << "wrote " << out_path.string() << "\n";
+  return 0;
+}
+
 int command_sweep(const Options& options) {
   for (const unsigned threads : resolve_sweep(options)) std::cout << threads << "\n";
   return 0;
@@ -642,7 +884,10 @@ int main(int argc, char** argv) {
     if (command == "build") return command_build(options);
     if (command == "sweep") return command_sweep(options);
     if (command == "size") return command_size(options);
-    if (command == "queries") return command_queries(options);
+    if (command == "gen-queries") return command_gen_queries(options);
+    if (command == "queries") return command_query_latency(options);
+    if (command == "quality") return command_quality(options);
+    if (command == "pick-grep-terms") return command_pick_grep_terms(options);
     if (command == "load") return command_load(options);
     if (command == "suggest") return command_suggest(options);
     if (command == "gen-typos") return command_gen_typos(options);

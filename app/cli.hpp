@@ -53,6 +53,7 @@ struct QueryArgs {
   unsigned threads = 1;
   RankMode mode = RankMode::BM25;
   std::size_t k = kDefaultTopK;
+  bool count_only = false;  // print the document frequency of the one query word and nothing else
   std::string text;
 };
 

@@ -1,0 +1,8 @@
+{
+  "name": "mini-search-index",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends g++-14 cmake ninja-build python3-venv wget git ca-certificates && sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100 && sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100",
+  "hostRequirements": {
+    "storage": "32gb"
+  }
+}

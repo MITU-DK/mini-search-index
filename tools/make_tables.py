@@ -372,9 +372,14 @@ result is about as long ({float(bm['mean_len_first_hit']):,.0f}), TF-IDF's is
 document length in it: a long article has more chances to contain each query word, and so scores
 higher than a short one that is about the title. BM25 divides the term frequency by a factor that
 grows with the length of the doc (b = 0.75), which cancels most of that advantage. The measurement
-above fits this: the docs that TF-IDF puts first are about three times longer than the targets, while
-BM25's are the same length. This explains the direction and size of the gap; it was not tested by
+above fits this: the docs that TF-IDF puts first are {float(tf['mean_len_first_hit']) / float(bm['mean_len_target']):.1f} times longer than the targets, while
+BM25's are {float(bm['mean_len_first_hit']) / float(bm['mean_len_target']):.2f} times as long. This explains the direction and size of the gap; it was not tested by
 adding length normalisation to TF-IDF, which would be the direct check.
+
+What the BM25 misses look like (listed once by hand, not recorded in the CSV): mostly one- or
+two-word titles of ambiguous names, such as a bare first name or surname, where thousands of other docs
+contain the same word more often than the short target doc does. None of them is a title shared with
+another doc.
 
 Limits: one index, one machine; known-item queries made from titles (the doc always contains every
 query word, which real queries do not guarantee); a title shared by two docs makes only one of them
@@ -413,10 +418,11 @@ the same way, 5 runs after one unrecorded run, median; the corpus and the index 
 |---|---:|---:|---:|---:|---:|
 {table}
 
-- grep takes {fmt(min(grep_times))} to {fmt(max(grep_times))} ms per word whatever the word, because it reads
-  the whole corpus every time; the index takes {fmt(min(index_times))} to {fmt(max(index_times))} ms, most
-  of it the start of the process. The speed-up is **{min(speedups):.0f}x to {max(speedups):.0f}x**, median
-  {st.median(speedups):.0f}x.
+- grep takes {fmt(min(grep_times))} to {fmt(max(grep_times))} ms per word, because it reads the whole
+  corpus every time, and the time does not clearly follow how common the word is. The index takes
+  {fmt(min(index_times))} to {fmt(max(index_times))} ms for every word, which suggests that it is mostly the
+  start of the process and the opening of the file. The speed-up is **{min(speedups):.0f}x to
+  {max(speedups):.0f}x**, median {st.median(speedups):.0f}x.
 - **Break-even.** Building the index takes {float(summary['build_s']):.1f} s at the fastest thread
   count in B1 ({summary['threads']} threads). A grep costs {fmt(float(summary['grep_ms_mean']))} ms on
   average and an indexed query {fmt(float(summary['index_ms_mean']))} ms, so the build is paid back after
@@ -433,13 +439,82 @@ the same way, 5 runs after one unrecorded run, median; the corpus and the index 
   nothing else.
 
 Limits: single-word counts only (grep cannot rank); one machine; the timings include process start
-for both sides; grep times vary more between words than the work would suggest ({fmt(min(grep_times))}
-to {fmt(max(grep_times))} ms for the same amount of data), which is probably the machine, not the word:
-the median of 5 runs was taken for each, but the runs of different words are minutes apart.
+for both sides; grep's times differ between words more than the identical amount of data would
+suggest ({fmt(min(grep_times))} to {fmt(max(grep_times))} ms) and the reason was not investigated: the median of 5 runs
+was taken for each word, but different words were measured minutes apart.
 """
 
 
+# ---------------------------------------------------------------- B1: indexing scaling
+
+
+def section_b1(results, machine, profile):
+    runs = {}
+    for row in read_csv(results / f"b1_build-{profile}.csv"):
+        runs.setdefault(int(row["threads"]), []).append(row)
+    runs = dict(sorted(runs.items()))
+    med = lambda rs, k: st.median(float(r[k]) for r in rs)
+    first = min(runs)
+    base_total, base_tok = med(runs[first], "total_s"), med(runs[first], "tokenize_s")
+    docs = int(read_csv(results / f"b2_size-{profile}.csv")[0]["docs"])
+    per_run = len(runs[first])
+    commits = sorted({r["commit"] for rs in runs.values() for r in rs})
+
+    rows, totals = [], {}
+    for t, rs in runs.items():
+        total = med(rs, "total_s")
+        totals[t] = total
+        merge = med(rs, "merge_s")
+        rows.append(
+            f"| {t} | {total:.2f} | {min(float(r['total_s']) for r in rs):.2f} to "
+            f"{max(float(r['total_s']) for r in rs):.2f} | {base_total / total:.2f}x "
+            f"| {med(rs, 'tokenize_s'):.2f} | {merge:.2f} | {100 * merge / total:.0f}% "
+            f"| {med(rs, 'peak_rss_kb') / 1024:,.0f} |"
+        )
+    best = min(totals, key=totals.get)
+    more = [t for t in totals if t > best]
+    parallel = [t for t in runs if t >= 2]
+    merges = [med(runs[t], "merge_s") for t in parallel]
+    top = max(runs)
+    fixed = med(runs[top], "scan_s") + med(runs[top], "merge_s")
+    after = ""
+    if more:
+        ratios = [totals[t] / totals[best] for t in more]
+        after = (
+            f" More threads than that were not faster: the total at {', '.join(map(str, more))} threads is "
+            f"{min(ratios):.2f} to {max(ratios):.2f} times the best."
+        )
+    return f"""## B1: indexing thread scaling ({machine}, `{profile}` profile, {docs:,} docs)
+
+Source: `benchmarks/results/{machine}/b1_build-{profile}.csv` ({per_run} runs per thread count after one
+discarded warm-up run, each thread count in a fresh process; commit {', '.join(f'`{c}`' for c in commits)}).
+The table shows the median of the {per_run} runs and the range of the total. Results are in-memory only: writing
+the index file is not part of these times.
+
+| Threads | Total (s) | Range | Speed-up | Tokenize (s) | Merge (s) | Merge share | Peak RSS (MiB) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+{chr(10).join(rows)}
+
+Measured, from the CSV:
+
+- **The best total is {totals[best]:.2f} s at {best} threads, {base_total / totals[best]:.2f}x faster than
+  {first} thread.**{after}
+- **The merge phase does not scale.** From {min(parallel)} threads up it takes {min(merges):.2f} to
+  {max(merges):.2f} s whatever the thread count, so its share of the total grows from
+  {100 * med(runs[min(parallel)], 'merge_s') / totals[min(parallel)]:.0f}% at {min(parallel)} threads to
+  {100 * med(runs[top], 'merge_s') / totals[top]:.0f}% at {top}. With the scan this fixed cost
+  ({fixed:.2f} s at {top} threads) caps the speed-up (Amdahl's law) at
+  {base_total / fixed:.0f}x even if tokenizing were free; in practice the tokenize phase is the larger limit.
+- **The tokenize phase alone reaches {base_tok / min(med(rs, 'tokenize_s') for rs in runs.values()):.1f}x**
+  ({base_tok:.1f} s to {min(med(rs, 'tokenize_s') for rs in runs.values()):.1f} s at
+  {min(runs, key=lambda t: med(runs[t], 'tokenize_s'))} threads).
+- **Memory use grows with threads**: {med(runs[first], 'peak_rss_kb') / MIB:.1f} GiB at {first} thread,
+  {max(med(rs, 'peak_rss_kb') for rs in runs.values()) / MIB:.1f} GiB at the most, because each worker
+  keeps its own term maps until the merge."""
+
+
 SECTIONS = {
+    "b1": section_b1,
     "b2": section_b2,
     "b3": section_b3,
     "b4": section_b4,

@@ -1,43 +1,49 @@
 # Benchmark notes
 
+<!-- BEGIN b1 -->
 ## B1: indexing thread scaling (laptop, `main` profile, 150,000 docs)
 
-Source: `benchmarks/results/laptop/b1_build-main.csv` (5 runs per thread count after one discarded
-warm-up run, each thread count in a fresh process). The machine is described in
-`benchmarks/results/laptop/machine.txt`: i7-12700H, 6 performance cores with SMT (12 logical CPUs) and
-8 efficiency cores (20 logical CPUs in all), plugged in, `performance` power profile. The table shows
-the median of the 5 runs.
+Source: `benchmarks/results/laptop/b1_build-main.csv` (5 runs per thread count after one
+discarded warm-up run, each thread count in a fresh process; commit `78dd832`).
+The table shows the median of the 5 runs and the range of the total. Results are in-memory only: writing
+the index file is not part of these times.
 
-| Threads | Total (s) | Speedup | Tokenize (s) | Merge (s) | Merge share | Peak RSS (MiB) |
-|---:|---:|---:|---:|---:|---:|---:|
-| 1 | 26.78 | 1.00x | 26.52 | 0.00 | 0% | 1117 |
-| 2 | 16.91 | 1.58x | 15.07 | 1.62 | 10% | 1739 |
-| 4 | 10.45 | 2.56x | 8.78 | 1.39 | 13% | 1693 |
-| 6 | 8.20 | 3.27x | 6.50 | 1.36 | 17% | 1715 |
-| 8 | 7.88 | 3.40x | 6.18 | 1.42 | 18% | 1881 |
-| 10 | 7.12 | 3.76x | 5.46 | 1.37 | 19% | 1929 |
-| 12 | 6.66 | 4.02x | 5.08 | 1.30 | 19% | 1902 |
-| 14 | 7.04 | 3.80x | 5.29 | 1.42 | 20% | 1924 |
-| 16 | 6.96 | 3.85x | 5.21 | 1.44 | 21% | 1959 |
-| 20 | 7.00 | 3.83x | 5.16 | 1.52 | 22% | 2034 |
-
-Results are in-memory only; writing the index file comes in Phase 4.
-
-### Where the speedup flattens, and what is known about why
-
-The speedup rises to **4.0x at 12 threads** and stays there. 14, 16 and 20 threads
-are no faster (they are within the run-to-run spread of the 12-thread result or slightly slower).
+| Threads | Total (s) | Range | Speed-up | Tokenize (s) | Merge (s) | Merge share | Peak RSS (MiB) |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 26.70 | 26.45 to 28.34 | 1.00x | 26.42 | 0.00 | 0% | 1,117 |
+| 2 | 17.16 | 17.09 to 17.83 | 1.56x | 15.31 | 1.61 | 9% | 1,671 |
+| 4 | 10.47 | 10.38 to 10.54 | 2.55x | 8.79 | 1.38 | 13% | 1,666 |
+| 6 | 8.22 | 8.18 to 8.28 | 3.25x | 6.54 | 1.40 | 17% | 1,740 |
+| 8 | 7.48 | 7.47 to 7.56 | 3.57x | 5.85 | 1.32 | 18% | 1,813 |
+| 10 | 7.10 | 6.95 to 7.12 | 3.76x | 5.41 | 1.31 | 18% | 1,925 |
+| 12 | 6.91 | 6.87 to 7.46 | 3.86x | 5.29 | 1.32 | 19% | 1,936 |
+| 14 | 6.65 | 6.56 to 6.86 | 4.02x | 5.00 | 1.32 | 20% | 1,943 |
+| 16 | 6.70 | 6.60 to 6.76 | 3.98x | 4.99 | 1.38 | 21% | 1,965 |
+| 20 | 6.87 | 6.71 to 7.04 | 3.89x | 5.08 | 1.49 | 22% | 2,046 |
 
 Measured, from the CSV:
 
-- **The merge phase does not scale.** It takes about 1.3 to 1.5 s at every thread count from 2 up, so its
-  share of the total grows from 10% at 2 threads to 22% at 20. Together with the scan (0.14 s) this
-  fixed cost caps the speedup (Amdahl's law): even if tokenizing were free, 20 threads could not beat
-  `26.8 / 1.7`, about 16x, and in practice the tokenize phase is the larger limit.
-- **The tokenize phase alone reaches about 5x** (26.5 s to 5.1 s at 12 threads) and does not improve
-  after that.
-- **Memory use grows with threads** (1.1 GiB at 1 thread, about 1.9 to 2.0 GiB from 8 up) because
-  each worker keeps its own term maps until the merge.
+- **The best total is 6.65 s at 14 threads, 4.02x faster than
+  1 thread.** More threads than that were not faster: the total at 16, 20 threads is 1.01 to 1.03 times the best.
+- **The merge phase does not scale.** From 2 threads up it takes 1.31 to
+  1.61 s whatever the thread count, so its share of the total grows from
+  9% at 2 threads to
+  22% at 20. With the scan this fixed cost
+  (1.65 s at 20 threads) caps the speed-up (Amdahl's law) at
+  16x even if tokenizing were free; in practice the tokenize phase is the larger limit.
+- **The tokenize phase alone reaches 5.3x**
+  (26.4 s to 5.0 s at
+  16 threads).
+- **Memory use grows with threads**: 1.1 GiB at 1 thread,
+  2.0 GiB at the most, because each worker
+  keeps its own term maps until the merge.
+<!-- END b1 -->
+
+The machine is described in `benchmarks/results/laptop/machine.txt`: i7-12700H, 6 performance cores
+with SMT (12 logical CPUs) and 8 efficiency cores (20 logical CPUs in all), plugged in, `performance`
+power profile.
+
+### What else is known about why the speed-up flattens
 
 Exploratory runs (single runs with a scratch driver under `taskset`, **not in the CSV and not to be
 quoted until redone with `msearch-bench` under `taskset`**):
@@ -136,44 +142,44 @@ every run. The time shown for a query is the search itself; the previews (snippe
 
 | Cache | Mode | Open (ms) | Range | First query (ms) | Range | Open + first query (ms) | RSS after open (MiB) | RSS after 1000 queries (MiB) | Major faults, first query | Minor faults, first query |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| cold | parse | 1,254 | 1,197 to 1,302 | 0.825 | 0.779 to 1.17 | 1,255 | 816 | 819 | 0 | 313 |
-| cold | read | 237 | 233 to 242 | 0.880 | 0.662 to 1.11 | 238 | 240 | 243 | 0 | 310 |
-| cold | mmap | 0.691 | 0.476 to 0.822 | 14.5 | 12.4 to 19.4 | 15.1 | 4 | 128 | 32 | 321 |
-| warm | parse | 1,103 | 1,053 to 1,170 | 0.793 | 0.782 to 0.927 | 1,104 | 816 | 819 | 0 | 313 |
-| warm | read | 110 | 108 to 111 | 0.695 | 0.645 to 0.734 | 111 | 240 | 243 | 0 | 310 |
-| warm | mmap | 0.015 | 0.013 to 0.016 | 1.19 | 1.14 to 1.22 | 1.20 | 4 | 133 | 0 | 350 |
+| cold | parse | 1,366 | 1,347 to 1,426 | 0.821 | 0.807 to 0.904 | 1,366 | 816 | 819 | 0 | 313 |
+| cold | read | 342 | 338 to 349 | 0.737 | 0.643 to 1.13 | 343 | 240 | 243 | 0 | 299 |
+| cold | mmap | 0.842 | 0.554 to 1.29 | 20.8 | 19.6 to 23.8 | 21.6 | 4 | 127 | 32 | 310 |
+| warm | parse | 1,139 | 1,125 to 1,169 | 0.824 | 0.813 to 0.854 | 1,140 | 816 | 819 | 0 | 313 |
+| warm | read | 112 | 110 to 115 | 0.701 | 0.669 to 0.889 | 112 | 240 | 243 | 0 | 299 |
+| warm | mmap | 0.016 | 0.012 to 0.017 | 1.17 | 0.750 to 1.18 | 1.18 | 4 | 133 | 0 | 339 |
 
 ### What the three modes show
 
-- **`parse` is slow because of decoding, not disk.** Opening takes 1,103 ms warm and 1,254 ms
-  cold. `read` also reads the whole file into memory and takes 110 ms warm, so decoding the
-  postings into hash maps costs about **993 ms**, which is 79% of the
-  cold `parse` time. The disk accounts for only about 151 ms (cold minus warm). `parse` also
+- **`parse` is slow because of decoding, not disk.** Opening takes 1,139 ms warm and 1,366 ms
+  cold. `read` also reads the whole file into memory and takes 112 ms warm, so decoding the
+  postings into hash maps costs about **1,028 ms**, which is 75% of the
+  cold `parse` time. The disk accounts for only about 226 ms (cold minus warm). `parse` also
   needs 812 MiB of memory, 3.4 times the size of the file, because
   hash maps and vectors take far more space than the packed bytes.
-- **`read` is a plain copy.** It spends its 110 ms warm copying 236 MiB into a buffer
-  and nothing decoding. Cold, the disk adds about 127 ms. Its memory is the size of the file.
-- **`mmap` opens in 0.015 ms warm and 0.691
+- **`read` is a plain copy.** It spends its 112 ms warm copying 236 MiB into a buffer
+  and nothing decoding. Cold, the disk adds about 231 ms. Its memory is the size of the file.
+- **`mmap` opens in 0.016 ms warm and 0.842
   ms cold**, because opening only maps the file and checks the header. Nothing is read until a query
   touches it, and the memory after opening is 4 MiB
   (only the program itself).
-- **The cost moves to the first query.** Warm, the first `mmap` query takes 1.19 ms against
-  0.793 ms for `parse`, which is 0.40 ms more. Mapped pages
+- **The cost moves to the first query.** Warm, the first `mmap` query takes 1.17 ms against
+  0.824 ms for `parse`, which is 0.34 ms more. Mapped pages
   that are already in the page cache still have to be entered into this process's page table, one minor
-  page fault each: 350 minor faults against
-  313 for `parse` (37 more; the rest is setup
-  that every mode shares). Cold, the first query takes **14.5 ms with
+  page fault each: 339 minor faults against
+  313 for `parse` (26 more; the rest is setup
+  that every mode shares). Cold, the first query takes **20.8 ms with
   32 major faults**, because those pages must come
   from disk. The `parse` and `read` first queries take under a millisecond, because everything is
   already in memory: they paid before the query, at open.
 - **Open plus first query**, which is how long a user waits for the first answer from a new process:
-  `mmap` 15.1 ms cold and 1.20 ms warm, `read`
-  238 ms and 111 ms, `parse` 1,255
-  ms and 1,104 ms.
+  `mmap` 21.6 ms cold and 1.18 ms warm, `read`
+  343 ms and 112 ms, `parse` 1,366
+  ms and 1,140 ms.
 - **After 1000 queries** `mmap` has 133 MiB resident,
   all of it file pages that the page cache shares with other processes, against
   819 MiB of private memory for `parse`. 1000 random
-  title queries touch about 56% of the
+  title queries touch about 57% of the
   file, which is why the memory grows.
 
 Limits of these numbers: one index on one machine; the first query is a single title, so its cold time
@@ -193,18 +199,18 @@ keeps the best 5 terms in every node.
 
 | Method | Build (ms) | Extra memory (MiB) | p50 (µs) | p95 (µs) |
 |---|---:|---:|---:|---:|
-| sorted table | 0 | 0 | 2.42 | 27.5 |
-| trie | 352 | 216 | 0.582 | 1.16 |
+| sorted table | 0 | 0 | 2.30 | 25.9 |
+| trie | 364 | 216 | 0.586 | 1.25 |
 
-- The trie answers **4.2x faster at the median and 24x faster at p95**.
-- It has to be built from every term before the first query: 352 ms here, on
+- The trie answers **3.9x faster at the median and 21x faster at p95**.
+- It has to be built from every term before the first query: 364 ms here, on
   every start of the program. That is the cost mmap was chosen to avoid (B3: the index opens in well
   under a millisecond).
 - It needs 216 MiB of memory on top of the index, about 0.9 times the size of
   the 236 MiB index file itself, because it has one node per distinct prefix of every term.
 - The table needs nothing extra: no build, no memory beyond the pages it touches.
 
-Why the sorted table stays the production path: 27.5 µs at p95 is far below anything a person
+Why the sorted table stays the production path: 25.9 µs at p95 is far below anything a person
 can notice while typing, so the trie's speed buys nothing visible, while its start-up time and memory
 are real costs. The table's slower tail is probably the 2-letter prefixes, which cover very large ranges
 of the term table; that was not measured separately.
@@ -227,10 +233,10 @@ answers, and they never did.
 
 | Method | p50 (µs) | p95 (µs) | Accuracy | Edit distances computed per typo |
 |---|---:|---:|---:|---:|
-| brute force | 33,657 | 40,266 | 73.0% | 205,261 |
-| BK-tree | 13,225 | 18,471 | 73.0% | 57,475 |
+| brute force | 34,035 | 40,571 | 73.0% | 205,261 |
+| BK-tree | 12,731 | 17,333 | 73.0% | 57,475 |
 
-- The BK-tree answers **2.5x faster at the median and 2.2x faster at p95**. That
+- The BK-tree answers **2.7x faster at the median and 2.3x faster at p95**. That
   is a real gain but a modest one, much smaller than the saving a BK-tree is often credited with.
   The likely reason is in the last column: for each typo the tree still computes
   57,475 edit distances, which is 15% of
@@ -238,8 +244,8 @@ answers, and they never did.
   length is too different to be within range, a shortcut the tree does not need). The
   triangle inequality rules out a subtree only when the distance to its root is far from the edge label,
   and with a limit of 2 edits on words of 5 or more letters, most of a large vocabulary is "near enough"
-  at some node to be worth looking into. Time per distance is 230 ns
-  for the tree against 164 ns for brute force at the median: the
+  at some node to be worth looking into. Time per distance is 222 ns
+  for the tree against 166 ns for brute force at the median: the
   tree pays somewhat more for each one, probably because it jumps around the file where brute force
   reads the term table in order (that was not measured separately), so the speed-up is smaller than
   the drop in the count.
@@ -254,3 +260,133 @@ Limits: one index, one machine, warm only; typos made by random single edits are
 human typos, which often have two or more errors; accuracy is measured against the word the typo was
 made from, which is not always the word a person meant.
 <!-- END b6 -->
+
+<!-- BEGIN b4 -->
+## B4: query latency and ranking quality (laptop, `main` index)
+
+Source: `benchmarks/results/laptop/b4_query-main.csv` and `b4_quality-main.csv`
+(`tools/run_benchmarks.sh b4 --machine laptop --profile main`). The queries are the titles of
+1000 random docs (seed 42, in `benchmarks/queries/known_item-main.tsv`), and the answer to each is
+the doc the title came from ("known-item" search). Top 10 results, no spell correction in the quality
+run. Titles are indexed, so each query is a title that the answer contains: this makes the task easier
+than real search, but it is a fair way to compare two rankings.
+
+### Latency
+
+Times are for one `search()` call in milliseconds, except `bm25+snippets`, which also reads the
+corpus and builds the preview of each of the 10 hits, as the command line does. **Warm**: the index
+and the corpus are in the page cache; one unrecorded pass, then 5 recorded passes (5000 timings per
+row). **Cold**: the index file was evicted just before the process opened it, one pass of 1000 queries,
+one fresh process per mode; it is not repeated, so a cold row is one run. The last column counts major
+page faults during the recorded queries (0 warm; above 0 cold, which is how the eviction is checked).
+Percentiles are nearest-rank.
+
+| Cache | Mode | p50 (ms) | p95 (ms) | p99 (ms) | mean (ms) | max (ms) | Major faults |
+|---|---|---:|---:|---:|---:|---:|---:|
+| warm | bm25 | 0.097 | 2.14 | 3.93 | 0.471 | 6.76 | 0 |
+| warm | tfidf | 0.128 | 2.63 | 4.80 | 0.614 | 9.36 | 0 |
+| warm | bm25+snippets | 0.518 | 2.57 | 4.47 | 0.811 | 7.46 | 0 |
+| cold | bm25 | 0.455 | 3.37 | 7.52 | 0.941 | 18.5 | 1371 |
+| cold | tfidf | 0.472 | 3.46 | 7.08 | 0.964 | 15.3 | 1371 |
+
+- Warm BM25: **p50 0.097 ms, p95 2.14 ms, p99
+  3.93 ms**. The mean (0.471 ms) is 4.8
+  times the median, so a minority of queries are much slower than the typical one; the likely cause is
+  titles with a common word, whose postings are long (not broken down by query).
+- Cold, the first pass over the index costs more: p50 0.455 ms and p99
+  7.52 ms, because each new page of postings is read from disk
+  (1371 major faults over the pass).
+- Previews add 0.421 ms at the median (p50 0.518 ms
+  against 0.097 ms), the cost of reading ten lines from the corpus.
+- TF-IDF is a little slower than BM25 here. That is probably this implementation (it calls `log` for
+  every posting where BM25 does plain arithmetic) and not a property of the ranking; it was not
+  investigated.
+
+### Quality
+
+| Ranking | MRR@10 | Hit@1 | Hit@10 | Mean length of the doc ranked first (tokens) |
+|---|---:|---:|---:|---:|
+| BM25 | 0.890 | 83.4% | 97.9% | 1,677 |
+| TF-IDF | 0.594 | 49.1% | 80.7% | 4,915 |
+
+The average length of the target docs is 1,669 tokens. BM25's first
+result is about as long (1,677), TF-IDF's is
+2.9 times as long (4,915).
+
+**Why BM25 beats TF-IDF here.** The TF-IDF score used here, the sum of (1 + ln tf) x ln(N/df), has no
+document length in it: a long article has more chances to contain each query word, and so scores
+higher than a short one that is about the title. BM25 divides the term frequency by a factor that
+grows with the length of the doc (b = 0.75), which cancels most of that advantage. The measurement
+above fits this: the docs that TF-IDF puts first are 2.9 times longer than the targets, while
+BM25's are 1.00 times as long. This explains the direction and size of the gap; it was not tested by
+adding length normalisation to TF-IDF, which would be the direct check.
+
+What the BM25 misses look like (listed once by hand, not recorded in the CSV): mostly one- or
+two-word titles of ambiguous names, such as a bare first name or surname, where thousands of other docs
+contain the same word more often than the short target doc does. None of them is a title shared with
+another doc.
+
+Limits: one index, one machine; known-item queries made from titles (the doc always contains every
+query word, which real queries do not guarantee); a title shared by two docs makes only one of them
+the right answer; cold rows are single runs.
+<!-- END b4 -->
+
+<!-- BEGIN b5 -->
+## B5: grep against the index (laptop, `main` index)
+
+Source: `benchmarks/results/laptop/b5_grep-main.csv` and `b5_breakeven-main.csv`
+(`tools/run_benchmarks.sh b5 --machine laptop --profile main`, which runs `tools/bench_grep.sh`).
+20 single words picked by seed from three bands of document frequency (`benchmarks/queries/grep_terms-main.txt`):
+5 rare (10 to 50 docs), 10 medium (0.1% to 1% of the docs) and 5 very common (over 20%).
+grep is `LC_ALL=C grep -cwiF` over every part file, with the counts summed (one doc is one line);
+the index side is `msearch query -i index.bin --count-only <word>`. Both are whole processes timed
+the same way, 5 runs after one unrecorded run, median; the corpus and the index were in the page cache.
+
+| Word | Docs (index) | Docs (grep) | grep (ms) | Index (ms) | Speed-up |
+|---|---:|---:|---:|---:|---:|
+| `ophrys` | 13 | 13 | 1,126 | 4.53 | 249x |
+| `squats` | 42 | 42 | 1,240 | 4.32 | 287x |
+| `glossop` | 48 | 48 | 843 | 4.33 | 195x |
+| `mutapa` | 11 | 11 | 1,289 | 4.48 | 288x |
+| `buttigieg` | 17 | 17 | 780 | 4.58 | 170x |
+| `undisturbed` | 440 | 440 | 875 | 4.64 | 189x |
+| `coarser` | 185 | 185 | 1,244 | 4.58 | 272x |
+| `sorrow` | 659 | 659 | 861 | 4.47 | 192x |
+| `bedrock` | 660 | 660 | 517 | 4.58 | 113x |
+| `bonner` | 170 | 170 | 1,314 | 4.54 | 289x |
+| `births` | 1,179 | 1,180 | 1,187 | 4.43 | 268x |
+| `outweighed` | 211 | 211 | 860 | 4.43 | 194x |
+| `procession` | 1,422 | 1,423 | 993 | 4.31 | 230x |
+| `fender` | 383 | 383 | 1,519 | 4.34 | 350x |
+| `administering` | 768 | 768 | 736 | 4.55 | 162x |
+| `husband` | 40,003 | 40,019 | 1,349 | 4.16 | 324x |
+| `established` | 40,015 | 40,032 | 1,036 | 4.59 | 226x |
+| `either` | 30,299 | 30,368 | 1,628 | 4.42 | 368x |
+| `several` | 61,047 | 61,056 | 1,271 | 4.65 | 274x |
+| `central` | 33,823 | 33,857 | 1,312 | 4.31 | 305x |
+
+- grep takes 517 to 1,628 ms per word, because it reads the whole
+  corpus every time, and the time does not clearly follow how common the word is. The index takes
+  4.16 to 4.65 ms for every word, which suggests that it is mostly the
+  start of the process and the opening of the file. The speed-up is **113x to
+  368x**, median 258x.
+- **Break-even.** Building the index takes 6.6 s at the fastest thread
+  count in B1 (14 threads). A grep costs 1,099 ms on
+  average and an indexed query 4.46 ms, so the build is paid back after
+  **6.1 queries**. This compares a count of one word; a ranked
+  search does more work than a count, so the real figure is a little higher.
+- **The counts.** grep and the index agree on 13 of 20 words. The
+  7 that differ are `births` (1 more), `procession` (1 more), `husband` (16 more), `established` (17 more), `either` (69 more), `several` (9 more), `central` (34 more): grep finds a few more docs in every case. The reason is
+  the rule for what a word is. `grep -w` in the C locale treats bytes of 0x80 and above (any
+  non-ASCII character) as separators, so it finds `births` in "births–deaths" with an en dash; the
+  tokenizer treats those bytes as part of a word, so for the index that word is `births–deaths` and not
+  `births`. (`grep -w` also treats `_` as a word character, which goes the other way.) The last column
+  of the CSV counts the docs with a regular expression that follows the tokenizer's rule, and it equals the
+  index's count for all 20 words, so the difference is explained by those rules and
+  nothing else.
+
+Limits: single-word counts only (grep cannot rank); one machine; the timings include process start
+for both sides; grep's times differ between words more than the identical amount of data would
+suggest (517 to 1,628 ms) and the reason was not investigated: the median of 5 runs
+was taken for each word, but different words were measured minutes apart.
+<!-- END b5 -->

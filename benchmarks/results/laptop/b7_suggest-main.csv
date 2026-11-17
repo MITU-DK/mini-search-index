@@ -1,3 +1,3 @@
 method,build_ms,extra_memory_bytes,p50_us,p95_us
-sorted_table,0,0,2.42,27.477
-trie,351.877,226557708,0.582,1.155
+sorted_table,0,0,2.3,25.93
+trie,364.114,226557708,0.586,1.253

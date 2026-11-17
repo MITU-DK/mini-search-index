@@ -1,0 +1,3 @@
+mode,mrr_at_10,hit_at_1,hit_at_10,queries,mean_len_first_hit,mean_len_target
+bm25,0.890167,0.834,0.979,1000,1676.92,1669.29
+tfidf,0.593951,0.491,0.807,1000,4915.03,1669.29

@@ -2,6 +2,8 @@
 
 #include <algorithm>
 
+#include "spellcheck.hpp"
+
 namespace mse {
 
 std::expected<IndexView, std::string> IndexView::open(std::span<const std::byte> bytes) {
@@ -19,7 +21,9 @@ IndexView::IndexView(std::span<const std::byte> file, const Header& header)
       part_names_(section_bytes(file, header, Section::PartNames)),
       terms_(section_bytes(file, header, Section::Terms)),
       strings_(section_bytes(file, header, Section::Strings)),
-      postings_(section_bytes(file, header, Section::Postings)) {}
+      postings_(section_bytes(file, header, Section::Postings)),
+      spell_nodes_(section_bytes(file, header, Section::SpellNodes)),
+      spell_edges_(section_bytes(file, header, Section::SpellEdges)) {}
 
 std::string_view IndexView::string_at(uint64_t offset, uint64_t length) const {
   const auto bytes = checked_range(strings_, offset, length, "string");
@@ -124,6 +128,59 @@ std::pair<uint32_t, uint32_t> IndexView::prefix_range(std::string_view prefix) c
   const uint32_t last = partition_point(
       [&](std::string_view term) { return term < prefix || term.starts_with(prefix); });
   return {first, last};
+}
+
+std::optional<std::string> IndexView::spell_suggest(std::string_view term) const {
+  const std::size_t node_count = spell_nodes_.size() / kSpellNodeSize;
+  const std::size_t edge_count = spell_edges_.size() / kSpellEdgeSize;
+  if (term.empty() || node_count == 0) return std::nullopt;
+  const uint32_t limit = max_edit_distance(term);
+
+  struct Best {
+    uint32_t distance;
+    uint32_t df;
+    uint32_t term_index;
+  };
+  std::optional<Best> best;
+  const auto is_better = [&](const Best& candidate) {
+    if (!best) return true;
+    if (candidate.distance != best->distance) return candidate.distance < best->distance;
+    if (candidate.df != best->df) return candidate.df > best->df;
+    return candidate.term_index < best->term_index;  // the table is sorted: alphabetical order
+  };
+
+  // A valid tree reaches every node once. More visits than nodes means the file has a cycle.
+  std::vector<uint32_t> pending{0};
+  std::size_t visits = 0;
+  while (!pending.empty() && visits++ < node_count) {
+    const std::size_t node_at = std::size_t{pending.back()} * kSpellNodeSize;
+    pending.pop_back();
+    const auto term_index = load_le<uint32_t>(spell_nodes_, node_at);
+    const auto first_edge = load_le<uint32_t>(spell_nodes_, node_at + 4);
+    const auto edges_here = load_le<uint32_t>(spell_nodes_, node_at + 8);
+
+    const std::string_view text = term_at(term_index);
+    if (text.empty()) continue;  // damaged: nothing can be said about this subtree
+    const uint32_t distance = levenshtein(term, text);
+    const uint32_t df = df_at(term_index);
+    if (distance <= limit && is_spell_eligible(df) && is_better({distance, df, term_index})) {
+      best = Best{distance, df, term_index};
+    }
+
+    if (uint64_t{first_edge} + edges_here > edge_count) continue;  // damaged
+    const uint32_t lowest = distance > limit ? distance - limit : 0;
+    const uint64_t highest = uint64_t{distance} + limit;
+    for (uint32_t i = 0; i < edges_here; ++i) {
+      const std::size_t edge_at = (std::size_t{first_edge} + i) * kSpellEdgeSize;
+      const auto edge_distance = load_le<uint32_t>(spell_edges_, edge_at);
+      const auto child = load_le<uint32_t>(spell_edges_, edge_at + 4);
+      if (edge_distance >= lowest && edge_distance <= highest && child < node_count) {
+        pending.push_back(child);
+      }
+    }
+  }
+  if (!best) return std::nullopt;
+  return std::string(term_at(best->term_index));
 }
 
 }  // namespace mse

@@ -10,7 +10,9 @@
 #include <cstring>
 #include <limits>
 
+#include "bktree.hpp"
 #include "file_descriptor.hpp"
+#include "spellcheck.hpp"
 #include "varint.hpp"
 
 namespace mse {
@@ -237,6 +239,10 @@ std::expected<void, std::string> IndexWriter::add_term(std::string_view term,
                   static_cast<std::streamsize>(block_.size()));
   if (!terms_ || !postings_) return std::unexpected("write to a temporary file failed");
 
+  if (options_.build_spell && is_spell_eligible(static_cast<uint32_t>(postings.size()))) {
+    spell_terms_.push_back({spell_text_.size(), static_cast<uint32_t>(term.size()), num_terms_});
+    spell_text_.append(term);
+  }
   postings_bytes_ += block_.size();
   total_postings_ += postings.size();
   last_term_.assign(term);
@@ -265,10 +271,9 @@ std::expected<void, std::string> IndexWriter::assemble(const Header& header) {
   if (auto ok = pwrite_all(out.get(), 0, head); !ok) return ok;
 
   const std::pair<Section, const std::vector<std::byte>*> small_sections[] = {
-      {Section::DocLengths, &doc_lengths_},
-      {Section::DocRefs, &doc_refs_},
-      {Section::DocTitles, &doc_titles_},
-      {Section::PartNames, &part_names_}};
+      {Section::DocLengths, &doc_lengths_}, {Section::DocRefs, &doc_refs_},
+      {Section::DocTitles, &doc_titles_},   {Section::PartNames, &part_names_},
+      {Section::SpellNodes, &spell_nodes_}, {Section::SpellEdges, &spell_edges_}};
   for (const auto& [section, bytes] : small_sections) {
     if (auto ok = pwrite_all(out.get(), header.section(section).offset, *bytes); !ok) return ok;
   }
@@ -285,11 +290,34 @@ std::expected<void, std::string> IndexWriter::assemble(const Header& header) {
   return {};
 }
 
+void IndexWriter::build_spell_sections() {
+  if (spell_terms_.empty()) return;
+  const auto start = std::chrono::steady_clock::now();
+  std::vector<std::pair<std::string_view, uint32_t>> terms;
+  terms.reserve(spell_terms_.size());
+  for (const SpellTerm& term : spell_terms_) {
+    terms.emplace_back(std::string_view(spell_text_).substr(term.offset, term.length),
+                       term.term_index);
+  }
+  const FlatBkTree tree = build_bktree(terms);
+  for (const SpellNode& node : tree.nodes) {
+    put_u32(spell_nodes_, node.term_index);
+    put_u32(spell_nodes_, node.first_edge);
+    put_u32(spell_nodes_, node.edge_count);
+  }
+  for (const SpellEdge& edge : tree.edges) {
+    put_u32(spell_edges_, edge.distance);
+    put_u32(spell_edges_, edge.child_node);
+  }
+  spell_build_s_ = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+}
+
 std::expected<WriteStats, std::string> IndexWriter::finish() {
   if (!docs_set_) return std::unexpected("set_docs must be called before finish");
   if (finished_) return std::unexpected("finish was already called");
   if (auto ok = close_streams(); !ok) return std::unexpected(ok.error());
 
+  build_spell_sections();
   Header header = header_;
   header.flags = options_.compress ? kFlagVByte : 0;
   header.num_terms = num_terms_;
@@ -301,6 +329,8 @@ std::expected<WriteStats, std::string> IndexWriter::finish() {
   header.section(Section::Terms).size = uint64_t{num_terms_} * kTermEntrySize;
   header.section(Section::Strings).size = strings_bytes_;
   header.section(Section::Postings).size = postings_bytes_;
+  header.section(Section::SpellNodes).size = spell_nodes_.size();
+  header.section(Section::SpellEdges).size = spell_edges_.size();
   assign_layout(header);
 
   if (auto ok = assemble(header); !ok) return std::unexpected(ok.error());
@@ -315,7 +345,8 @@ std::expected<WriteStats, std::string> IndexWriter::finish() {
       .postings_bytes = postings_bytes_,
       .raw_postings_bytes = total_postings_ * kRawPostingSize,
       .write_s = std::chrono::duration<double>(std::chrono::steady_clock::now() - started_).count(),
-      .spell_build_s = 0};
+      .spell_build_s = spell_build_s_,
+      .spell_bytes = spell_nodes_.size() + spell_edges_.size()};
 }
 
 std::expected<WriteStats, std::string> write_index(const InMemoryIndex& index, const fs::path& out,

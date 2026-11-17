@@ -19,7 +19,7 @@ namespace mse {
 
 struct WriteOptions {
   bool compress = true;     // gap + VByte postings; false writes raw {u32 doc, u32 tf} pairs
-  bool build_spell = true;  // used from the spell-check task on; the spell sections are empty now
+  bool build_spell = true;  // store the BK-tree of terms in at least kSpellMinDf docs
 };
 
 struct WriteStats {
@@ -27,7 +27,8 @@ struct WriteStats {
   uint64_t postings_bytes = 0;      // size of the postings section
   uint64_t raw_postings_bytes = 0;  // what it would be uncompressed: 8 bytes per posting
   double write_s = 0;               // from create() to the end of finish()
-  double spell_build_s = 0;
+  double spell_build_s = 0;         // building the BK-tree; 0 if there are no spell sections
+  uint64_t spell_bytes = 0;         // size of the two spell sections together
 };
 
 // Memory use does not grow with the number of terms: postings, term entries and term strings go to
@@ -89,6 +90,20 @@ class IndexWriter {
   uint32_t num_terms_ = 0;
   std::string last_term_;
   std::vector<std::byte> block_;  // scratch space for one postings block
+
+  // The terms the BK-tree is built from, collected as they arrive: their bytes, concatenated, and
+  // where each one is.
+  struct SpellTerm {
+    std::size_t offset;
+    uint32_t length;
+    uint32_t term_index;
+  };
+  std::string spell_text_;
+  std::vector<SpellTerm> spell_terms_;
+  std::vector<std::byte> spell_nodes_;  // set by finish
+  std::vector<std::byte> spell_edges_;
+  double spell_build_s_ = 0;
+  void build_spell_sections();
 };
 
 // Sorts the index's terms and feeds them to an IndexWriter.

@@ -191,8 +191,9 @@ TEST(IndexView, SearcherCrossCheck) {
       for (int w = 0; w < words; ++w) {
         text += (w > 0 ? " w" : "w") + std::to_string(rng() % 850);  // some words are not indexed
       }
-      const auto expected = from_memory.search(text);
-      const auto actual = from_view.search(text);
+      // Spell-checking is off: only the file-backed reader can do it, and this is about ranking.
+      const auto expected = from_memory.search(text, {.spellcheck = false});
+      const auto actual = from_view.search(text, {.spellcheck = false});
       EXPECT_TRUE(actual.hits == expected.hits) << "query \"" << text << "\"";
     }
   }

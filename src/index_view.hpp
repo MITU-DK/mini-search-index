@@ -45,6 +45,11 @@ class IndexView {
   std::string_view part_name(uint32_t part) const;
   std::string_view corpus_root() const;
 
+  // The best correction of `term` found by walking the stored BK-tree, or nullopt if there is
+  // none, if the file has no spell data, or if that data is damaged. The answer is always the
+  // one suggest_brute (spellcheck.hpp) gives.
+  std::optional<std::string> spell_suggest(std::string_view term) const;
+
   // The terms that start with `prefix` are the entries [first, last) of the term table.
   std::pair<uint32_t, uint32_t> prefix_range(std::string_view prefix) const;
 
@@ -66,6 +71,8 @@ class IndexView {
   std::span<const std::byte> terms_;
   std::span<const std::byte> strings_;
   std::span<const std::byte> postings_;
+  std::span<const std::byte> spell_nodes_;
+  std::span<const std::byte> spell_edges_;
 };
 
 }  // namespace mse

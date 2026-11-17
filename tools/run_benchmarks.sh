@@ -4,13 +4,14 @@
 #   tools/run_benchmarks.sh b1 --machine laptop --profile main [--threads 1,2,4 | auto] [--repeat 5]
 #   tools/run_benchmarks.sh b2 --machine laptop --profile main
 #   tools/run_benchmarks.sh b3 --machine laptop --profile main [--repeat 5]   (needs b2 first)
+#   tools/run_benchmarks.sh b6 --machine laptop --profile main                (needs b2 first)
 #   tools/run_benchmarks.sh b7 --machine laptop --profile main                (needs b2 first)
 #
 # Each thread count runs in a fresh process, so peak memory is not carried over from a
 # previous one. The CSV of the benchmark is started again (not appended to) on every invocation.
 set -euo pipefail
 
-usage() { echo "usage: $0 <b1|b2|b3|b7> --machine M --profile P [--threads SWEEP] [--repeat N]" >&2; exit 2; }
+usage() { echo "usage: $0 <b1|b2|b3|b6|b7> --machine M --profile P [--threads SWEEP] [--repeat N]" >&2; exit 2; }
 
 [ $# -ge 1 ] || usage
 benchmark=$1
@@ -89,6 +90,15 @@ case $benchmark in
       exit 1
     }
     echo "wrote $csv"
+    ;;
+  b6)
+    index="data/index/$profile/vbyte.bin"
+    typos="benchmarks/queries/typos-$profile.tsv"
+    [ -f "$index" ] || { echo "error: $index is missing; run b2 first" >&2; exit 1; }
+    # 200 seeded single-edit typos of common words (DESIGN.md §11). Kept in git, so the same
+    # typos are used on every machine; made again only if the file is missing.
+    [ -f "$typos" ] || "$bench" gen-typos --index "$index" --n 200 --seed 42 --out "$typos"
+    "$bench" spell --index "$index" --typos "$typos" --machine "$machine" --profile "$profile"
     ;;
   b7)
     index="data/index/$profile/vbyte.bin"

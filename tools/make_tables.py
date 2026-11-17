@@ -43,6 +43,14 @@ def section_b2(results, machine, profile):
     docs, nterms, post = i("docs"), i("terms"), i("postings")
     corpus, raw_file, v_file = i("corpus_bytes"), i("raw_file_bytes"), i("vbyte_file_bytes")
     raw_post, v_post = i("raw_postings_bytes"), i("vbyte_postings_bytes")
+    spell_note = ""
+    if "vbyte_spell_bytes" in r:
+        spell = i("vbyte_spell_bytes")
+        spell_note = (
+            f"\n- The BK-tree for spell checking is {mib(spell)} of that file "
+            f"({100 * spell / v_file:.1f}%). Building it took {float(r['spell_build_s']):.1f} s, "
+            f"done once when the index is written."
+        )
     rows = "\n".join(
         f"| {x['df_rank']} | `{x['term']}` | {int(x['df']):,} | {float(x['bytes_per_gap']):.2f} "
         f"| {float(x['bytes_per_posting']):.2f} |"
@@ -73,7 +81,7 @@ Source: `benchmarks/results/{machine}/b2_size-{profile}.csv` and `b2_terms-{prof
   **{raw_post / v_post:.2f}x smaller** and {v_post / post:.2f} bytes per posting.
 - The whole file is {raw_file / v_file:.2f}x smaller, not {raw_post / v_post:.2f}x, because the rest of
   the file does not shrink: the file minus its postings is {mib(v_file - v_post)}, of which the term
-  table alone is {nterms:,} x 24 bytes = {mib(nterms * 24)}.
+  table alone is {nterms:,} x 24 bytes = {mib(nterms * 24)}.{spell_note}
 
 ### Why a common word costs about 1 byte per gap
 
@@ -232,7 +240,57 @@ sample, noticeable only for the trie; one machine, one index, warm only.
 """
 
 
-SECTIONS = {"b2": section_b2, "b3": section_b3, "b7": section_b7}
+# ---------------------------------------------------------------- B6: spell check
+
+
+def section_b6(results, machine, profile):
+    rows = {r["method"]: r for r in read_csv(results / f"b6_spell-{profile}.csv")}
+    typos = ROOT / "benchmarks" / "queries" / f"typos-{profile}.tsv"
+    count = sum(1 for _ in open(typos)) - 1  # minus the header line
+    brute, tree = rows["brute_force"], rows["bk_tree"]
+    b50, b95 = float(brute["p50_us"]), float(brute["p95_us"])
+    t50, t95 = float(tree["p50_us"]), float(tree["p95_us"])
+    accuracy = float(tree["accuracy"])
+    b2 = read_csv(results / f"b2_size-{profile}.csv")[0]
+    spell_note = ""
+    if "vbyte_spell_bytes" in b2:
+        spell_note = (
+            f"- The tree is stored in the index file: {int(b2['vbyte_spell_bytes']) / MIB:,.1f} MiB, "
+            f"built in {float(b2['spell_build_s']):.1f} s when the index is written (B2), so opening "
+            f"the index has nothing to build.\n"
+        )
+    return f"""## B6: spell check, brute force vs BK-tree ({machine}, `{profile}` index)
+
+Source: `benchmarks/results/{machine}/b6_spell-{profile}.csv` (`tools/run_benchmarks.sh b6 --machine
+{machine} --profile {profile}`) and the typos in `benchmarks/queries/typos-{profile}.tsv`. The typos are
+{count} seeded single edits (an insertion, deletion, substitution or swap of neighbours, one per
+word) of words of 5 or more letters that occur in at least 50 docs, and a typo that is itself an indexed
+word was not used. Each typo is asked 5 times after one unrecorded pass, so the times are warm;
+percentiles are nearest-rank over the {count * 5} timings. Both methods use the same index and the
+same candidate terms (those in at least 3 docs); the benchmark stops if they ever give different
+answers, and they never did.
+
+| Method | p50 (µs) | p95 (µs) | Accuracy |
+|---|---:|---:|---:|
+| brute force | {fmt(b50)} | {fmt(b95)} | {100 * float(brute["accuracy"]):.1f}% |
+| BK-tree | {fmt(t50)} | {fmt(t95)} | {100 * accuracy:.1f}% |
+
+- The BK-tree answers **{b50 / t50:.0f}x faster at the median and {b95 / t95:.0f}x faster at p95**: it
+  compares the word with only the part of the tree that the triangle inequality cannot rule out,
+  where brute force compares it with every candidate term of a similar length.
+{spell_note}- Accuracy is the share of typos for which the suggestion was the word the typo was made from.
+  It is the same for both methods because they give the same answers. It is below 100% because the
+  rule picks the closest term and then the commonest, and a different, commoner word can be as close as
+  the original: that is what the rule does, not a fault in the tree. A swap of two letters counts as
+  two edits, so those typos compete with every word one edit away.
+
+Limits: one index, one machine, warm only; typos made by random single edits are easier than real
+human typos, which often have two or more errors; accuracy is measured against the word the typo was
+made from, which is not always the word a person meant.
+"""
+
+
+SECTIONS = {"b2": section_b2, "b3": section_b3, "b6": section_b6, "b7": section_b7}
 
 
 def replace_section(text, key, body):

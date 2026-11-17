@@ -436,5 +436,24 @@ TEST(Cli, SearchSuggestCommandCompletesPrefixes) {
   EXPECT_EQ(none, 3u) << result.out;
 }
 
+TEST(Cli, MisspelledQueryOnASavedIndexShowsTheCorrection) {
+  TempDir dir;
+  const auto built = build_index(spell_corpus_dir(), {});
+  ASSERT_TRUE(built.has_value());
+  const auto path = dir.path() / "spell.bin";
+  ASSERT_TRUE(write_index(*built, path, {}).has_value());
+
+  const CliRun result = run({"query", "-i", path.string(), "machne lerning"});
+  EXPECT_EQ(result.code, 0) << result.err;
+  EXPECT_NE(result.out.find(
+                "Showing results for \"machine learning\" (no match for \"machne lerning\")."),
+            std::string::npos)
+      << result.out;
+  EXPECT_NE(result.out.find("Top results"), std::string::npos) << result.out;
+
+  const CliRun fine = run({"query", "-i", path.string(), "machine learning"});
+  EXPECT_EQ(fine.out.find("Showing results for"), std::string::npos) << fine.out;
+}
+
 }  // namespace
 }  // namespace mse

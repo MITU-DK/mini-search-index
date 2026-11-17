@@ -107,6 +107,20 @@ struct TermEntry {
   uint64_t postings_off = 0;
 };
 
+// One node of the BK-tree (spell_nodes section): the term it holds, and its edges, which are the
+// entries [first_edge, first_edge + edge_count) of the spell_edges section.
+struct SpellNode {
+  uint32_t term_index = 0;  // position in the term table
+  uint32_t first_edge = 0;
+  uint32_t edge_count = 0;
+};
+
+// One edge: the child node holds a term at this edit distance from the parent's term.
+struct SpellEdge {
+  uint32_t distance = 0;
+  uint32_t child_node = 0;
+};
+
 void encode_header(const Header& header, std::span<std::byte, kHeaderSize> out);
 void encode_term_entry(const TermEntry& entry, std::span<std::byte, kTermEntrySize> out);
 TermEntry decode_term_entry(std::span<const std::byte, kTermEntrySize> in);

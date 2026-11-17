@@ -173,7 +173,12 @@ std::string answer(const R& reader, Searcher<R>& searcher, const QueryArgs& args
   const std::vector<ResultLine> lines = make_result_lines(reader, response, corpus_root_override);
   const double took_ms =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-  return format_results(lines, took_ms, color);
+  std::string printed;
+  if (response.corrected_query) {
+    printed = std::format("Showing results for \"{}\" (no match for \"{}\").\n",
+                          *response.corrected_query, trim(text));
+  }
+  return printed + format_results(lines, took_ms, color);
 }
 
 int query_in_memory(const QueryArgs& args, std::ostream& out, std::ostream& err, bool color) {

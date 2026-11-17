@@ -10,6 +10,10 @@
 //                                                 known-item queries: the titles of N random docs
 //   msearch-bench suggest --index F --n N --seed S --machine M --profile P
 //                                                 autocomplete: sorted table vs trie (B7)
+//   msearch-bench gen-typos --index F --n N --seed S --out FILE
+//                                                 N seeded single-edit typos of common words
+//   msearch-bench spell --index F --typos FILE --machine M --profile P
+//                                                 spell check: brute force vs BK-tree (B6)
 //   msearch-bench load --index F --mode parse|read|mmap --cache cold|warm --queries Q
 //                      --machine M --profile P --commit H [--record yes|no]
 //                                                 one load measurement, in this fresh process
@@ -23,6 +27,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <optional>
 #include <random>
 #include <sstream>
 #include <string>
@@ -38,6 +43,7 @@
 #include "parsed_loader.hpp"
 #include "procstats.hpp"
 #include "searcher.hpp"
+#include "spellcheck.hpp"
 #include "stats.hpp"
 #include "thread_sweep.hpp"
 #include "trie.hpp"
@@ -234,11 +240,12 @@ int command_size(const Options& options) {
   std::ofstream csv(csv_path, std::ios::trunc);
   const uint64_t postings = index->total_postings();
   csv << "docs,terms,postings,corpus_bytes,raw_file_bytes,vbyte_file_bytes,raw_postings_bytes,"
-         "vbyte_postings_bytes,bytes_per_posting_vbyte\n"
+         "vbyte_postings_bytes,bytes_per_posting_vbyte,vbyte_spell_bytes,spell_build_s\n"
       << index->docs.size() << ',' << index->postings.size() << ',' << postings << ','
       << corpus_bytes(corpus) << ',' << raw.file_bytes << ',' << vbyte.file_bytes << ','
       << raw.postings_bytes << ',' << vbyte.postings_bytes << ','
-      << static_cast<double>(vbyte.postings_bytes) / static_cast<double>(postings) << '\n';
+      << static_cast<double>(vbyte.postings_bytes) / static_cast<double>(postings) << ','
+      << vbyte.spell_bytes << ',' << vbyte.spell_build_s << '\n';
   if (!csv) throw std::runtime_error("cannot write " + csv_path.string());
   std::cerr << "wrote " << csv_path.string() << "\n";
 
@@ -455,6 +462,158 @@ int command_suggest(const Options& options) {
   return 0;
 }
 
+// ---- B6: spell check ----
+
+// One seeded edit of `word`: an insertion, deletion, substitution or swap of two neighbours.
+std::string seeded_typo(std::string word, std::mt19937& rng) {
+  const auto letter = [&] { return static_cast<char>('a' + rng() % 26); };
+  switch (rng() % 4) {
+    case 0:
+      word.insert(word.begin() + static_cast<std::ptrdiff_t>(rng() % (word.size() + 1)), letter());
+      break;
+    case 1:
+      word.erase(rng() % word.size(), 1);
+      break;
+    case 2: {
+      const std::size_t at = rng() % word.size();
+      char replacement = letter();
+      while (replacement == word[at]) replacement = letter();
+      word[at] = replacement;
+      break;
+    }
+    default: {
+      const std::size_t at = rng() % (word.size() - 1);
+      std::swap(word[at], word[at + 1]);
+      break;
+    }
+  }
+  return word;
+}
+
+bool is_plain_word(std::string_view text) {
+  return std::all_of(text.begin(), text.end(), [](char c) { return c >= 'a' && c <= 'z'; });
+}
+
+int command_gen_typos(const Options& options) {
+  const auto index = mse::Index::open(need(options, "index"), mse::LoadMode::Mmap);
+  if (!index) throw std::runtime_error(index.error());
+  const mse::IndexView& view = index->view();
+
+  // Words of 5 or more letters in at least 50 docs, so that a typo has one obvious right answer.
+  std::vector<uint32_t> candidates;
+  for (uint32_t i = 0; i < view.num_terms(); ++i) {
+    const std::string_view term = view.term_at(i);
+    if (view.df_at(i) >= 50 && term.size() >= 5 && is_plain_word(term)) candidates.push_back(i);
+  }
+  const unsigned count = parse_repeat(get_or(options, "n", "200"));
+  if (candidates.size() < count) throw std::runtime_error("the index has too few common words");
+
+  std::mt19937 rng(static_cast<uint32_t>(std::stoul(get_or(options, "seed", "42"))));
+  const std::filesystem::path out_path = need(options, "out");
+  if (out_path.has_parent_path()) std::filesystem::create_directories(out_path.parent_path());
+  std::ofstream out(out_path, std::ios::trunc);
+  out << "typo\tword\n";
+  for (unsigned made = 0; made < count;) {
+    const std::size_t pick = made + rng() % (candidates.size() - made);
+    std::swap(candidates[made], candidates[pick]);  // a partial shuffle: no word is used twice
+    const std::string word(view.term_at(candidates[made]));
+    std::string typo = seeded_typo(word, rng);
+    // A typo that is itself a word of the index would have more than one right answer.
+    if (typo == word || view.find_term(typo)) continue;
+    out << typo << '\t' << word << '\n';
+    ++made;
+  }
+  if (!out) throw std::runtime_error("cannot write " + out_path.string());
+  std::cerr << "wrote " << out_path.string() << "\n";
+  return 0;
+}
+
+struct Typo {
+  std::string typo;
+  std::string word;
+};
+
+std::vector<Typo> read_typos(const std::filesystem::path& path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("cannot read " + path.string());
+  std::vector<Typo> typos;
+  std::string line;
+  std::getline(in, line);  // the header
+  while (std::getline(in, line)) {
+    const std::size_t tab = line.find('\t');
+    if (tab == std::string::npos) throw std::runtime_error("bad line in " + path.string());
+    typos.push_back({line.substr(0, tab), line.substr(tab + 1)});
+  }
+  if (typos.empty()) throw std::runtime_error(path.string() + " has no typos");
+  return typos;
+}
+
+struct SpellTiming {
+  std::vector<double> microseconds;
+  std::vector<std::optional<std::string>> answers;  // one per typo
+};
+
+constexpr unsigned kSpellPasses = 5;
+
+// One unrecorded pass (which also gives the answers), then kSpellPasses recorded ones.
+template <class Suggest>
+SpellTiming time_spell(const std::vector<Typo>& typos, const Suggest& suggest) {
+  SpellTiming result;
+  for (const Typo& typo : typos) result.answers.push_back(suggest(typo.typo));
+  std::size_t sink = 0;
+  for (unsigned pass = 0; pass < kSpellPasses; ++pass) {
+    for (const Typo& typo : typos) {
+      const auto start = std::chrono::steady_clock::now();
+      sink += suggest(typo.typo).has_value();
+      result.microseconds.push_back(milliseconds_since(start) * 1000.0);
+    }
+  }
+  if (sink == 0) throw std::runtime_error("no typo got a suggestion");  // also keeps `sink` used
+  return result;
+}
+
+double accuracy_of(const SpellTiming& timing, const std::vector<Typo>& typos) {
+  std::size_t right = 0;
+  for (std::size_t i = 0; i < typos.size(); ++i) right += timing.answers[i] == typos[i].word;
+  return static_cast<double>(right) / static_cast<double>(typos.size());
+}
+
+int command_spell(const Options& options) {
+#ifndef NDEBUG
+  std::cerr << "error: this is not a release build; its numbers would mean nothing.\n";
+  return 1;
+#endif
+  const auto index = mse::Index::open(need(options, "index"), mse::LoadMode::Mmap);
+  if (!index) throw std::runtime_error(index.error());
+  const mse::IndexView& view = index->view();
+  const std::vector<Typo> typos = read_typos(need(options, "typos"));
+
+  const SpellTiming brute =
+      time_spell(typos, [&](const std::string& word) { return mse::suggest_brute(view, word); });
+  const SpellTiming tree =
+      time_spell(typos, [&](const std::string& word) { return view.spell_suggest(word); });
+  for (std::size_t i = 0; i < typos.size(); ++i) {
+    if (brute.answers[i] != tree.answers[i]) {
+      throw std::runtime_error("the BK-tree and the brute-force speller disagree on \"" +
+                               typos[i].typo + "\"; the numbers would mean nothing");
+    }
+  }
+
+  const std::filesystem::path csv_path =
+      std::filesystem::path(get_or(options, "results", "benchmarks/results")) /
+      need(options, "machine") / ("b6_spell-" + need(options, "profile") + ".csv");
+  std::filesystem::create_directories(csv_path.parent_path());
+  std::ofstream csv(csv_path, std::ios::trunc);
+  csv << "method,p50_us,p95_us,accuracy\n"
+      << "brute_force," << mse::percentile(brute.microseconds, 50) << ','
+      << mse::percentile(brute.microseconds, 95) << ',' << accuracy_of(brute, typos) << '\n'
+      << "bk_tree," << mse::percentile(tree.microseconds, 50) << ','
+      << mse::percentile(tree.microseconds, 95) << ',' << accuracy_of(tree, typos) << '\n';
+  if (!csv) throw std::runtime_error("cannot write " + csv_path.string());
+  std::cerr << "wrote " << csv_path.string() << "\n";
+  return 0;
+}
+
 int command_sweep(const Options& options) {
   for (const unsigned threads : resolve_sweep(options)) std::cout << threads << "\n";
   return 0;
@@ -474,6 +633,8 @@ int main(int argc, char** argv) {
     if (command == "queries") return command_queries(options);
     if (command == "load") return command_load(options);
     if (command == "suggest") return command_suggest(options);
+    if (command == "gen-typos") return command_gen_typos(options);
+    if (command == "spell") return command_spell(options);
     throw std::invalid_argument("unknown command \"" + std::string(command) + "\"");
   } catch (const std::exception& e) {
     std::cerr << "error: " << e.what() << "\n";

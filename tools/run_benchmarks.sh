@@ -8,7 +8,7 @@
 #   tools/run_benchmarks.sh b5 --machine laptop --profile main                (needs b2 and b1)
 #   tools/run_benchmarks.sh b6 --machine laptop --profile main                (needs b2 first)
 #   tools/run_benchmarks.sh b7 --machine laptop --profile main                (needs b2 first)
-#   tools/run_benchmarks.sh b8 --machine laptop --profile main [--budgets 256M,512M,1G] [--threads N|auto]
+#   tools/run_benchmarks.sh b8 --machine laptop --profile main [--budgets 256M,512M,1G] [--threads 4,auto]
 #                                                      [--repeat N]   (bounded-memory builds)
 #
 #   tools/run_benchmarks.sh all --machine laptop --profile main               (b2, then the rest)
@@ -17,7 +17,8 @@
 # build's alone) and keeps the index of the last one as data/index/<profile>/vbyte.bin if there is none
 # yet, which is how the `full` index for b3, b4, b6 and b7 is made. Where vbyte.bin is already there
 # (the in-memory index of b2) it is compared with the new file byte for byte, and a difference is an
-# error. Defaults: budgets 64M,128M for dev, 256M,512M,1G for main and 2G,4G,8G for full; repeat 3 (1 for full).
+# error. Defaults: budgets 64M,128M for dev, 256M,512M,1G for main and 2G,4G,8G for full; threads 4 and
+# all of them for dev and main, all of them for full; repeat 3 (1 for full).
 #
 # Each thread count runs in a fresh process, so peak memory is not carried over from a
 # previous one. The CSV of the benchmark is started again (not appended to) on every invocation.
@@ -28,13 +29,13 @@ usage() { echo "usage: $0 <b1|b2|b3|b4|b5|b6|b7|b8|all> --machine M --profile P 
 [ $# -ge 1 ] || usage
 benchmark=$1
 shift
-machine="" profile="" threads="auto" repeat=5 repeat_set=no budgets=""
+machine="" profile="" threads="auto" threads_set=no repeat=5 repeat_set=no budgets=""
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || usage
   case $1 in
     --machine) machine=$2 ;;
     --profile) profile=$2 ;;
-    --threads) threads=$2 ;;
+    --threads) threads=$2; threads_set=yes ;;
     --repeat) repeat=$2; repeat_set=yes ;;
     --budgets) budgets=$2 ;;
     *) usage ;;
@@ -159,14 +160,19 @@ case $benchmark in
   b8)
     # The bounded-memory build. One fresh process per budget and per repeat.
     case $profile in
-      dev) default_budgets=64M,128M; default_repeat=3 ;;
-      main) default_budgets=256M,512M,1G; default_repeat=3 ;;
-      *) default_budgets=2G,4G,8G; default_repeat=1 ;;
+      dev) default_budgets=64M,128M; default_repeat=3; default_threads=4,auto ;;
+      main) default_budgets=256M,512M,1G; default_repeat=3; default_threads=4,auto ;;
+      *) default_budgets=2G,4G,8G; default_repeat=1; default_threads=auto ;;
     esac
+    [ "$threads_set" = yes ] || threads=$default_threads
     [ -n "$budgets" ] || budgets=$default_budgets
     [ "$repeat_set" = yes ] || repeat=$default_repeat
-    [ "$threads" != auto ] || threads=$(nproc)
-    case $threads in *[!0-9]*|"") echo "error: b8 takes one thread count (a number or auto), not \"$threads\"" >&2; exit 2 ;; esac
+    thread_counts=()
+    for t in ${threads//,/ }; do
+      [ "$t" != auto ] || t=$(nproc)
+      case $t in *[!0-9]*|"") echo "error: b8 thread counts are numbers or auto, not \"$t\"" >&2; exit 2 ;; esac
+      thread_counts+=("$t")
+    done
 
     index_dir="data/index/$profile"
     tmp_dir="data/tmp/$profile-runs"
@@ -187,12 +193,14 @@ case $benchmark in
     rm -f "$out/b8_full-$profile.csv"
     compare=()
     [ -f "$existing" ] && compare=(--compare "$existing")
-    for budget in ${budgets//,/ }; do
-      for run in $(seq 1 "$repeat"); do
-        echo "b8: budget $budget, run $run of $repeat"
-        "$bench" full-build --corpus "$corpus" --budget "$budget" --threads "$threads" \
-          --tmp-dir "$tmp_dir" --out "$candidate" "${compare[@]}" \
-          --machine "$machine" --profile "$profile" --commit "$commit"
+    for t in "${thread_counts[@]}"; do
+      for budget in ${budgets//,/ }; do
+        for run in $(seq 1 "$repeat"); do
+          echo "b8: $t threads, budget $budget, run $run of $repeat"
+          "$bench" full-build --corpus "$corpus" --budget "$budget" --threads "$t" \
+            --tmp-dir "$tmp_dir" --out "$candidate" "${compare[@]}" \
+            --machine "$machine" --profile "$profile" --commit "$commit"
+        done
       done
     done
     rmdir "$tmp_dir" 2> /dev/null || true

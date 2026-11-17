@@ -113,6 +113,7 @@ tried (2, 4 and 8 GiB by default). The steps, from the repository root with the 
 `.venv` made as `run_on_new_machine.sh` does it:
 
 ```sh
+mkdir -p benchmarks/results/<machine-name>
 tools/fetch_wikipedia.sh full                      # about 24 GB; resumes if interrupted
 .venv/bin/python -m wikiextractor.WikiExtractor data/raw/enwiki-*-pages-articles.xml.bz2 \
     --json -o data/extracted/full --processes "$(nproc)" --quiet

@@ -195,7 +195,8 @@ The design decisions that matter, each measured in a benchmark:
 - **By default the index is built in memory.** Peak memory while building is in the B1 table of RESULTS.md and
   grows with the corpus. For a corpus that does not fit, `--memory-budget` selects a bounded-memory build (see
   below), which writes sorted pieces to disk and merges them with one sequential k-way merge. It makes the
-  same file, but it is not a faster build.
+  same file, but it is not a faster build. The bounded-memory build has been measured on the `main` corpus only (B8 above); a run on the
+  full English Wikipedia needs about 100 GB of disk and has not been done yet ([docs/CLOUD.md](docs/CLOUD.md)).
 - **Indexing does not scale with the number of threads.** The speed-up table above shows it. The merge stage
   does not get faster with more threads (see above), and the laptop's cores are not all alike. Only one machine
   has been measured.

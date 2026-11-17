@@ -112,7 +112,8 @@ Reading it from the start:
 
   The six docs take 6 x 4 = 24 bytes of lengths, 6 x 16 = 96 of refs and 6 x 8 = 48 of title
   references; there are 2 parts (2 x 8 = 16) and 27 terms (27 x 24 = 648). The spell sections are
-  empty until spell check is built into the index.
+  empty here because no term of this corpus occurs in 3 or more docs, and only those are stored
+  in the spell tree.
 - bytes 192 to 199: the corpus root, offset 0 and length 13 in `strings`
   (`/tmp/mse-tiny`); bytes 200 to 203: num_parts 2.
 
@@ -142,3 +143,33 @@ each of docs 1 (`Beta`) and 2 (`Gamma`). In raw mode the same block would be 16 
 Because the terms are sorted by their bytes, a lookup does a binary search over the 27 entries,
 compares each probe against its string in `strings`, and stops at the entry for the word, with no
 parsing step.
+
+### The spell tree
+
+The spell sections hold a BK-tree over the terms that occur in at least 3 docs. A second small corpus,
+`tests/data/spell_corpus`, has exactly two such terms, `learning` (term 10 of its table) and
+`machine` (term 11), so its tree is a root and one child:
+
+```sh
+cp -r tests/data/spell_corpus /tmp/mse-spell
+build/release/msearch index /tmp/mse-spell -o /tmp/mse-spell.bin
+xxd -s 1320 -l 32 /tmp/mse-spell.bin
+```
+
+```
+00000528: 0a00 0000 0000 0000 0100 0000 0b00 0000  ................
+00000538: 0100 0000 0000 0000 0500 0000 0100 0000  ................
+```
+
+- `spell_nodes` is at 1320 and is 24 bytes: two nodes of 12 bytes. Node 0, the root, is
+  `{term_index 10, first_edge 0, edge_count 1}`: it holds `learning`. Node 1 is
+  `{term_index 11, first_edge 1, edge_count 0}`: it holds `machine` and has no children.
+- `spell_edges` is at 1344 and is 8 bytes: one edge `{distance 5, child_node 1}`, meaning that the
+  edit distance from `learning` to `machine` is 5.
+
+To find the best correction of a word, a search starts at the root, computes the distance `d` from
+the word to the node's term, and keeps that term if `d` is within the limit (1 for words of up to 4
+bytes, 2 for longer ones). It then follows only the edges whose distance is between `d - limit` and
+`d + limit`: by the triangle inequality no term below any other edge can be close enough. The
+suggestion is the term with the smallest distance, then the most docs, then the alphabetically
+first.

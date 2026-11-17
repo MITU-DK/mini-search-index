@@ -127,7 +127,7 @@ gaps are large. Raw postings always cost 8.
 ## B3: loading the index, `parse` vs `read` vs `mmap` (laptop, `main` index)
 
 Source: `benchmarks/results/laptop/b3_load-main.csv` (`tools/run_benchmarks.sh b3 --machine
-laptop --profile main`). The index is `data/index/main/vbyte.bin` (228 MiB, from B2).
+laptop --profile main`). The index is `data/index/main/vbyte.bin` (236 MiB, from B2).
 Every measurement is a fresh process; one discarded round first, then 5 runs per cell. The table shows
 medians and the min to max range of the two times. **Cold** means the file was evicted from the page
 cache with `posix_fadvise(DONTNEED)` just before opening; **warm** means it was already cached. The
@@ -136,44 +136,44 @@ every run. The time shown for a query is the search itself; the previews (snippe
 
 | Cache | Mode | Open (ms) | Range | First query (ms) | Range | Open + first query (ms) | RSS after open (MiB) | RSS after 1000 queries (MiB) | Major faults, first query | Minor faults, first query |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| cold | parse | 1,282 | 1,227 to 1,343 | 0.808 | 0.776 to 0.853 | 1,283 | 816 | 819 | 0 | 313 |
-| cold | read | 253 | 247 to 256 | 0.689 | 0.656 to 1.25 | 254 | 233 | 236 | 0 | 310 |
-| cold | mmap | 0.537 | 0.513 to 0.674 | 11.9 | 10.8 to 15.4 | 12.4 | 4 | 127 | 32 | 321 |
-| warm | parse | 1,131 | 1,097 to 1,179 | 0.811 | 0.770 to 0.975 | 1,132 | 816 | 819 | 0 | 313 |
-| warm | read | 111 | 107 to 121 | 0.656 | 0.641 to 0.688 | 112 | 233 | 236 | 0 | 310 |
-| warm | mmap | 0.016 | 0.009 to 0.017 | 1.13 | 0.738 to 1.18 | 1.15 | 4 | 133 | 0 | 350 |
+| cold | parse | 1,254 | 1,197 to 1,302 | 0.825 | 0.779 to 1.17 | 1,255 | 816 | 819 | 0 | 313 |
+| cold | read | 237 | 233 to 242 | 0.880 | 0.662 to 1.11 | 238 | 240 | 243 | 0 | 310 |
+| cold | mmap | 0.691 | 0.476 to 0.822 | 14.5 | 12.4 to 19.4 | 15.1 | 4 | 128 | 32 | 321 |
+| warm | parse | 1,103 | 1,053 to 1,170 | 0.793 | 0.782 to 0.927 | 1,104 | 816 | 819 | 0 | 313 |
+| warm | read | 110 | 108 to 111 | 0.695 | 0.645 to 0.734 | 111 | 240 | 243 | 0 | 310 |
+| warm | mmap | 0.015 | 0.013 to 0.016 | 1.19 | 1.14 to 1.22 | 1.20 | 4 | 133 | 0 | 350 |
 
 ### What the three modes show
 
-- **`parse` is slow because of decoding, not disk.** Opening takes 1,131 ms warm and 1,282 ms
-  cold. `read` also reads the whole file into memory and takes 111 ms warm, so decoding the
-  postings into hash maps costs about **1,020 ms**, which is 80% of the
+- **`parse` is slow because of decoding, not disk.** Opening takes 1,103 ms warm and 1,254 ms
+  cold. `read` also reads the whole file into memory and takes 110 ms warm, so decoding the
+  postings into hash maps costs about **993 ms**, which is 79% of the
   cold `parse` time. The disk accounts for only about 151 ms (cold minus warm). `parse` also
-  needs 812 MiB of memory, 3.6 times the size of the file, because
+  needs 812 MiB of memory, 3.4 times the size of the file, because
   hash maps and vectors take far more space than the packed bytes.
-- **`read` is a plain copy.** It spends its 111 ms warm copying 228 MiB into a buffer
-  and nothing decoding. Cold, the disk adds about 142 ms. Its memory is the size of the file.
-- **`mmap` opens in 0.016 ms warm and 0.537
+- **`read` is a plain copy.** It spends its 110 ms warm copying 236 MiB into a buffer
+  and nothing decoding. Cold, the disk adds about 127 ms. Its memory is the size of the file.
+- **`mmap` opens in 0.015 ms warm and 0.691
   ms cold**, because opening only maps the file and checks the header. Nothing is read until a query
   touches it, and the memory after opening is 4 MiB
   (only the program itself).
-- **The cost moves to the first query.** Warm, the first `mmap` query takes 1.13 ms against
-  0.811 ms for `parse`, which is 0.32 ms more. Mapped pages
+- **The cost moves to the first query.** Warm, the first `mmap` query takes 1.19 ms against
+  0.793 ms for `parse`, which is 0.40 ms more. Mapped pages
   that are already in the page cache still have to be entered into this process's page table, one minor
   page fault each: 350 minor faults against
   313 for `parse` (37 more; the rest is setup
-  that every mode shares). Cold, the first query takes **11.9 ms with
+  that every mode shares). Cold, the first query takes **14.5 ms with
   32 major faults**, because those pages must come
   from disk. The `parse` and `read` first queries take under a millisecond, because everything is
   already in memory: they paid before the query, at open.
 - **Open plus first query**, which is how long a user waits for the first answer from a new process:
-  `mmap` 12.4 ms cold and 1.15 ms warm, `read`
-  254 ms and 112 ms, `parse` 1,283
-  ms and 1,132 ms.
+  `mmap` 15.1 ms cold and 1.20 ms warm, `read`
+  238 ms and 111 ms, `parse` 1,255
+  ms and 1,104 ms.
 - **After 1000 queries** `mmap` has 133 MiB resident,
   all of it file pages that the page cache shares with other processes, against
   819 MiB of private memory for `parse`. 1000 random
-  title queries touch about 58% of the
+  title queries touch about 56% of the
   file, which is why the memory grows.
 
 Limits of these numbers: one index on one machine; the first query is a single title, so its cold time
@@ -231,8 +231,8 @@ answers, and they never did.
 | BK-tree | 13,225 | 18,471 | 73.0% | 57,475 |
 
 - The BK-tree answers **2.5x faster at the median and 2.2x faster at p95**. That
-  is a real gain but a modest one, and it is not the "thousands of times" that a BK-tree is sometimes
-  said to give. The reason is in the last column: for each typo the tree still computes
+  is a real gain but a modest one, much smaller than the saving a BK-tree is often credited with.
+  The likely reason is in the last column: for each typo the tree still computes
   57,475 edit distances, which is 15% of
   its 395,539 nodes, against 205,261 for brute force (which skips terms whose
   length is too different to be within range, a shortcut the tree does not need). The
@@ -245,10 +245,10 @@ answers, and they never did.
   the drop in the count.
 - The tree is stored in the index file: 7.5 MiB, built in 0.7 s when the index is written (B2), so opening the index has nothing to build.
 - Accuracy is the share of typos for which the suggestion was the word the typo was made from.
-  It is the same for both methods because they give the same answers. It is below 100% because the
-  rule picks the closest term and then the commonest, and a different, commoner word can be as close as
-  the original: that is what the rule does, not a fault in the tree. A swap of two letters counts as
-  two edits, so those typos compete with every word one edit away.
+  It is the same for both methods because they give the same answers. It is below 100%, probably
+  because the rule picks the closest term and then the commonest, and a different, commoner word can
+  be as close as the original; that is how the rule works, not a fault in the tree. It was not
+  broken down by kind of edit, so this is an explanation and not a measurement.
 
 Limits: one index, one machine, warm only; typos made by random single edits are easier than real
 human typos, which often have two or more errors; accuracy is measured against the word the typo was

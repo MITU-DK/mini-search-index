@@ -279,8 +279,8 @@ answers, and they never did.
 | BK-tree | {fmt(t50)} | {fmt(t95)} | {100 * accuracy:.1f}% | {float(tree["avg_distance_calls"]):,.0f} |
 
 - The BK-tree answers **{b50 / t50:.1f}x faster at the median and {b95 / t95:.1f}x faster at p95**. That
-  is a real gain but a modest one, and it is not the "thousands of times" that a BK-tree is sometimes
-  said to give. The reason is in the last column: for each typo the tree still computes
+  is a real gain but a modest one, much smaller than the saving a BK-tree is often credited with.
+  The likely reason is in the last column: for each typo the tree still computes
   {float(tree["avg_distance_calls"]):,.0f} edit distances, which is {100 * float(tree["avg_distance_calls"]) / nodes:.0f}% of
   its {nodes:,} nodes, against {float(brute["avg_distance_calls"]):,.0f} for brute force (which skips terms whose
   length is too different to be within range, a shortcut the tree does not need). The
@@ -292,10 +292,10 @@ answers, and they never did.
   reads the term table in order (that was not measured separately), so the speed-up is smaller than
   the drop in the count.
 {spell_note}- Accuracy is the share of typos for which the suggestion was the word the typo was made from.
-  It is the same for both methods because they give the same answers. It is below 100% because the
-  rule picks the closest term and then the commonest, and a different, commoner word can be as close as
-  the original: that is what the rule does, not a fault in the tree. A swap of two letters counts as
-  two edits, so those typos compete with every word one edit away.
+  It is the same for both methods because they give the same answers. It is below 100%, probably
+  because the rule picks the closest term and then the commonest, and a different, commoner word can
+  be as close as the original; that is how the rule works, not a fault in the tree. It was not
+  broken down by kind of edit, so this is an explanation and not a measurement.
 
 Limits: one index, one machine, warm only; typos made by random single edits are easier than real
 human typos, which often have two or more errors; accuracy is measured against the word the typo was

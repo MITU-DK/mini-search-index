@@ -10,6 +10,8 @@
 #include <fstream>
 #include <limits>
 
+#include "file_descriptor.hpp"
+
 namespace mse {
 namespace {
 
@@ -20,22 +22,6 @@ constexpr std::size_t kScanBufferSize = 1 << 20;  // 1 MiB
 std::unexpected<std::string> fail(const fs::path& file, std::string_view what) {
   return std::unexpected(file.string() + ": " + std::string(what));
 }
-
-// Closes the descriptor when it goes out of scope.
-class FileDescriptor {
- public:
-  explicit FileDescriptor(int fd) : fd_(fd) {}
-  ~FileDescriptor() {
-    if (fd_ >= 0) ::close(fd_);
-  }
-  FileDescriptor(const FileDescriptor&) = delete;
-  FileDescriptor& operator=(const FileDescriptor&) = delete;
-
-  int get() const { return fd_; }
-
- private:
-  int fd_;
-};
 
 // Appends one DocRef per line of `file`. Line i ends at its '\n'; a last line without '\n' counts.
 std::expected<void, std::string> scan_part(const fs::path& file, uint32_t part,

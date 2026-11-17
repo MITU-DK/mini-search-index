@@ -20,10 +20,12 @@ struct DocInfo {
 };
 
 struct InMemoryIndex {
-  std::string corpus_root;                                         // absolute
-  std::vector<std::string> part_names;                             // DocRef::part indexes this
-  std::vector<DocInfo> docs;                                       // index = doc id
-  std::unordered_map<std::string, std::vector<Posting>> postings;  // each list sorted by doc
+  using PostingsMap = std::unordered_map<std::string, std::vector<Posting>>;
+
+  std::string corpus_root;              // absolute
+  std::vector<std::string> part_names;  // DocRef::part indexes this
+  std::vector<DocInfo> docs;            // index = doc id
+  PostingsMap postings;                 // each list sorted by doc
 
   double avg_doc_len() const {
     if (docs.empty()) return 0.0;

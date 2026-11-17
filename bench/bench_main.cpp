@@ -1,10 +1,13 @@
 // msearch-bench: runs the benchmarks of DESIGN.md §11 and appends their rows to CSV files.
 //
 //   msearch-bench sweep --threads <sweep>        prints the thread counts, one per line
+//   msearch-bench size --corpus D --machine M --profile P [--index-dir DIR] [--results DIR]
+//                                                 writes the index raw and VByte, records sizes
 //   msearch-bench build --corpus D --threads <sweep> --repeat N --machine M --profile P
 //                       --commit H [--results DIR]
 //
 // For a clean peak-RSS number, tools/run_benchmarks.sh starts a new process for each thread count.
+#include <algorithm>
 #include <charconv>
 #include <chrono>
 #include <cstdlib>
@@ -17,9 +20,11 @@
 #include <thread>
 #include <vector>
 
+#include "index_writer.hpp"
 #include "indexer.hpp"
 #include "procstats.hpp"
 #include "thread_sweep.hpp"
+#include "varint.hpp"
 
 namespace {
 
@@ -131,6 +136,101 @@ int command_build(const Options& options) {
   return 0;
 }
 
+// The bytes of all part files of a corpus.
+uint64_t corpus_bytes(const std::filesystem::path& corpus) {
+  uint64_t total = 0;
+  for (const auto& entry : std::filesystem::directory_iterator(corpus)) {
+    const std::string name = entry.path().filename().string();
+    if (name.starts_with("part-") && name.ends_with(".tsv")) total += entry.file_size();
+  }
+  return total;
+}
+
+mse::WriteStats write_or_throw(const mse::InMemoryIndex& index, const std::filesystem::path& path,
+                               bool compress) {
+  const auto stats = mse::write_index(index, path, {.compress = compress});
+  if (!stats) throw std::runtime_error(stats.error());
+  return *stats;
+}
+
+struct TermCost {
+  const std::string* term;
+  uint64_t df;
+  uint64_t gap_bytes;
+  uint64_t tf_bytes;
+};
+
+// What each term's postings would cost in VByte, split into the gap numbers and the tf numbers.
+std::vector<TermCost> term_costs(const mse::InMemoryIndex& index) {
+  std::vector<TermCost> costs;
+  costs.reserve(index.postings.size());
+  for (const auto& [term, list] : index.postings) {
+    TermCost cost{&term, list.size(), 0, 0};
+    uint32_t previous = 0;
+    for (const mse::Posting& posting : list) {
+      cost.gap_bytes += mse::uleb128_size(posting.doc - previous);
+      cost.tf_bytes += mse::uleb128_size(posting.tf);
+      previous = posting.doc;
+    }
+    costs.push_back(cost);
+  }
+  return costs;
+}
+
+// One row for the term of each df rank in kRanks (1 = the term in the most docs), to show how the
+// cost per posting depends on how dense a list is.
+void write_term_cost_csv(const mse::InMemoryIndex& index, const std::filesystem::path& path) {
+  std::vector<TermCost> costs = term_costs(index);
+  std::sort(costs.begin(), costs.end(), [](const TermCost& a, const TermCost& b) {
+    return a.df != b.df ? a.df > b.df : *a.term < *b.term;
+  });
+  std::ofstream csv(path, std::ios::trunc);
+  csv << "df_rank,term,df,gap_bytes,tf_bytes,bytes_per_gap,bytes_per_posting\n";
+  for (const std::size_t rank : {1u, 2u, 3u, 10u, 100u, 1000u, 10000u, 100000u, 1000000u}) {
+    if (rank > costs.size()) break;
+    const TermCost& cost = costs[rank - 1];
+    const auto df = static_cast<double>(cost.df);
+    csv << rank << ',' << *cost.term << ',' << cost.df << ',' << cost.gap_bytes << ','
+        << cost.tf_bytes << ',' << static_cast<double>(cost.gap_bytes) / df << ','
+        << static_cast<double>(cost.gap_bytes + cost.tf_bytes) / df << '\n';
+  }
+  if (!csv) throw std::runtime_error("cannot write " + path.string());
+}
+
+int command_size(const Options& options) {
+  const std::filesystem::path corpus = need(options, "corpus");
+  const std::string machine = need(options, "machine");
+  const std::string profile = need(options, "profile");
+  const std::filesystem::path index_dir = get_or(options, "index-dir", "data/index/" + profile);
+
+  auto index =
+      mse::build_index(corpus, {.threads = std::max(1u, std::thread::hardware_concurrency())});
+  if (!index) throw std::runtime_error(index.error());
+  std::filesystem::create_directories(index_dir);
+  const mse::WriteStats raw = write_or_throw(*index, index_dir / "raw.bin", false);
+  const mse::WriteStats vbyte = write_or_throw(*index, index_dir / "vbyte.bin", true);
+
+  const std::filesystem::path csv_path =
+      std::filesystem::path(get_or(options, "results", "benchmarks/results")) / machine /
+      ("b2_size-" + profile + ".csv");
+  std::filesystem::create_directories(csv_path.parent_path());
+  std::ofstream csv(csv_path, std::ios::trunc);
+  const uint64_t postings = index->total_postings();
+  csv << "docs,terms,postings,corpus_bytes,raw_file_bytes,vbyte_file_bytes,raw_postings_bytes,"
+         "vbyte_postings_bytes,bytes_per_posting_vbyte\n"
+      << index->docs.size() << ',' << index->postings.size() << ',' << postings << ','
+      << corpus_bytes(corpus) << ',' << raw.file_bytes << ',' << vbyte.file_bytes << ','
+      << raw.postings_bytes << ',' << vbyte.postings_bytes << ','
+      << static_cast<double>(vbyte.postings_bytes) / static_cast<double>(postings) << '\n';
+  if (!csv) throw std::runtime_error("cannot write " + csv_path.string());
+  std::cerr << "wrote " << csv_path.string() << "\n";
+
+  const auto terms_path = csv_path.parent_path() / ("b2_terms-" + profile + ".csv");
+  write_term_cost_csv(*index, terms_path);
+  std::cerr << "wrote " << terms_path.string() << "\n";
+  return 0;
+}
+
 int command_sweep(const Options& options) {
   for (const unsigned threads : resolve_sweep(options)) std::cout << threads << "\n";
   return 0;
@@ -146,6 +246,7 @@ int main(int argc, char** argv) {
     const Options options = parse_options(argc, argv);
     if (command == "build") return command_build(options);
     if (command == "sweep") return command_sweep(options);
+    if (command == "size") return command_size(options);
     throw std::invalid_argument("unknown command \"" + std::string(command) + "\"");
   } catch (const std::exception& e) {
     std::cerr << "error: " << e.what() << "\n";

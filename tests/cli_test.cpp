@@ -7,6 +7,10 @@
 #include <string_view>
 #include <vector>
 
+#include "index_writer.hpp"
+#include "indexer.hpp"
+#include "parsed_loader.hpp"
+#include "temp_dir.hpp"
 #include "test_data.hpp"
 
 namespace mse {
@@ -207,6 +211,93 @@ TEST(Cli, HelpPrintsUsageAndSucceeds) {
     EXPECT_EQ(result.code, 0);
     EXPECT_NE(result.out.find("Usage:"), std::string::npos);
   }
+}
+
+// ---- parse_index_args ----
+
+TEST(Cli, ParseIndexArgsFull) {
+  auto parsed =
+      parse_index_args(Args{"data/dev", "-o", "idx.bin", "--threads", "8", "--no-compress"});
+  ASSERT_TRUE(parsed.has_value()) << parsed.error();
+  EXPECT_EQ(parsed->corpus, "data/dev");
+  EXPECT_EQ(parsed->out, "idx.bin");
+  EXPECT_EQ(parsed->threads, 8u);
+  EXPECT_FALSE(parsed->compress);
+}
+
+TEST(Cli, ParseIndexArgsDefaults) {
+  auto parsed = parse_index_args(Args{"-o", "idx.bin", "data/dev"});  // flags can come first
+  ASSERT_TRUE(parsed.has_value()) << parsed.error();
+  EXPECT_EQ(parsed->threads, 1u);
+  EXPECT_TRUE(parsed->compress);
+}
+
+TEST(Cli, ParseIndexArgsErrors) {
+  const std::vector<Args> bad = {
+      {"-o", "idx.bin"},                  // no corpus
+      {"data/dev"},                       // no output file
+      {"a", "b", "-o", "idx.bin"},        // two corpora
+      {"data/dev", "-o"},                 // -o without a value
+      {"data/dev", "-o", "i", "--nope"},  // unknown flag
+      {"data/dev", "-o", "i", "--threads", "0"},
+      {"data/dev", "-o", "i", "--threads"},
+  };
+  for (const Args& args : bad) {
+    EXPECT_FALSE(parse_index_args(args).has_value()) << args.size() << " args, first: " << args[0];
+  }
+}
+
+// ---- the index command ----
+
+TEST(Cli, IndexCommandWritesAnIndexAndReportsIt) {
+  TempDir dir;
+  const std::string out_file = (dir.path() / "i.bin").string();
+  const CliRun result = run({"index", tiny_corpus_dir().string(), "-o", out_file});
+  EXPECT_EQ(result.code, 0) << result.err;
+  EXPECT_NE(result.out.find("docs:      6"), std::string::npos) << result.out;
+  EXPECT_NE(result.out.find("terms:     27"), std::string::npos) << result.out;
+  EXPECT_NE(result.out.find("postings:  29"), std::string::npos) << result.out;
+  for (const char* phase : {"scan:", "tokenize:", "merge:", "write:", "file:"}) {
+    EXPECT_NE(result.out.find(phase), std::string::npos) << phase;
+  }
+
+  const auto loaded = load_parsed(out_file);
+  ASSERT_TRUE(loaded.has_value()) << loaded.error();
+  EXPECT_EQ(loaded->docs.size(), 6u);
+  EXPECT_EQ(loaded->postings.size(), 27u);
+}
+
+TEST(Cli, IndexCommandNoCompressWritesALargerFile) {
+  TempDir dir;
+  const std::string corpus = tiny_corpus_dir().string();
+  ASSERT_EQ(run({"index", corpus, "-o", (dir.path() / "c.bin").string()}).code, 0);
+  ASSERT_EQ(run({"index", corpus, "-o", (dir.path() / "r.bin").string(), "--no-compress"}).code, 0);
+  EXPECT_LT(std::filesystem::file_size(dir.path() / "c.bin"),
+            std::filesystem::file_size(dir.path() / "r.bin"));
+}
+
+TEST(Cli, IndexCommandFailsCleanly) {
+  TempDir dir;
+  const CliRun missing_corpus =
+      run({"index", "/nonexistent/mse", "-o", (dir.path() / "i.bin").string()});
+  EXPECT_EQ(missing_corpus.code, 1);
+  EXPECT_NE(missing_corpus.err.find("error:"), std::string::npos);
+  EXPECT_FALSE(std::filesystem::exists(dir.path() / "i.bin"));
+
+  const CliRun missing_dir =
+      run({"index", tiny_corpus_dir().string(), "-o", (dir.path() / "no" / "i.bin").string()});
+  EXPECT_EQ(missing_dir.code, 1);
+  EXPECT_NE(missing_dir.err.find("error:"), std::string::npos);
+
+  const CliRun bad_usage = run({"index", tiny_corpus_dir().string()});
+  EXPECT_EQ(bad_usage.code, 1);
+  EXPECT_NE(bad_usage.err.find("Usage:"), std::string::npos);
+}
+
+TEST(Cli, UsageMentionsBothCommands) {
+  const CliRun result = run({"--help"});
+  EXPECT_NE(result.out.find("msearch query"), std::string::npos);
+  EXPECT_NE(result.out.find("msearch index"), std::string::npos);
 }
 
 }  // namespace

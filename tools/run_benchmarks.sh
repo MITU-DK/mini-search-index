@@ -2,12 +2,13 @@
 # Runs the benchmarks and writes CSV files under benchmarks/results/<machine>/ (DESIGN.md §11).
 #
 #   tools/run_benchmarks.sh b1 --machine laptop --profile main [--threads 1,2,4 | auto] [--repeat 5]
+#   tools/run_benchmarks.sh b2 --machine laptop --profile main
 #
 # Each thread count runs in a fresh process, so peak memory is not carried over from a
 # previous one. The CSV of the benchmark is started again (not appended to) on every invocation.
 set -euo pipefail
 
-usage() { echo "usage: $0 <b1> --machine M --profile P [--threads SWEEP] [--repeat N]" >&2; exit 2; }
+usage() { echo "usage: $0 <b1|b2> --machine M --profile P [--threads SWEEP] [--repeat N]" >&2; exit 2; }
 
 [ $# -ge 1 ] || usage
 benchmark=$1
@@ -50,6 +51,9 @@ case $benchmark in
         --machine "$machine" --profile "$profile" --commit "$commit"
     done
     echo "wrote $out/b1_build-$profile.csv"
+    ;;
+  b2)
+    "$bench" size --corpus "$corpus" --machine "$machine" --profile "$profile"
     ;;
   *) usage ;;
 esac

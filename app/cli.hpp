@@ -54,6 +54,17 @@ struct QueryArgs {
 [[nodiscard]] std::expected<QueryArgs, std::string> parse_query_args(
     std::span<const std::string_view> args);
 
+struct IndexArgs {
+  std::filesystem::path corpus;
+  std::filesystem::path out;
+  unsigned threads = 1;
+  bool compress = true;
+};
+
+// Parses what follows `msearch index`: one corpus directory and `-o <file>`, in any order.
+[[nodiscard]] std::expected<IndexArgs, std::string> parse_index_args(
+    std::span<const std::string_view> args);
+
 // Runs `msearch <args>`: results go to `out`, progress and errors to `err`.
 // Returns the process exit code: 0 on success, 1 on any error.
 int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostream& err,

@@ -49,14 +49,12 @@ std::expected<uint32_t, std::string> read_uleb128(std::span<const std::byte> in,
 
 void encode_postings(std::span<const Posting> postings, std::vector<std::byte>& out) {
   uint32_t previous = 0;
-  bool first = true;
-  for (const Posting& posting : postings) {
-    assert(first || posting.doc > previous);
-    assert(posting.tf >= 1);
-    append_uleb128(posting.doc - previous, out);
-    append_uleb128(posting.tf, out);
-    previous = posting.doc;
-    first = false;
+  for (std::size_t i = 0; i < postings.size(); ++i) {
+    assert(i == 0 || postings[i].doc > postings[i - 1].doc);
+    assert(postings[i].tf >= 1);
+    append_uleb128(postings[i].doc - previous, out);
+    append_uleb128(postings[i].tf, out);
+    previous = postings[i].doc;
   }
 }
 

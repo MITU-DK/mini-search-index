@@ -4,4 +4,6 @@ build/
 *.tmp
 .venv/
 .superpowers/
-docs/
+docs/DESIGN.md
+docs/PLAN.md
+docs/CODING_STYLE.md

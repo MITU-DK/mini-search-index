@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <system_error>
 
+#include "index_writer.hpp"
 #include "indexer.hpp"
 
 namespace mse {
@@ -18,9 +19,11 @@ constexpr std::string_view kIndent = "    ";
 
 constexpr std::string_view kUsage =
     "Usage:\n"
+    "  msearch index <corpus> -o <index.bin> [--threads N|auto] [--no-compress]\n"
     "  msearch query --corpus <dir> [--threads N|auto] [--rank bm25|tfidf] [-k N] <text>...\n"
     "  msearch --help\n"
     "\n"
+    "index builds the index and saves it to a file.\n"
     "query builds the index in memory, then prints the top results with previews.\n"
     "Use \"--\" before the query text if the text itself starts with \"-\".\n";
 
@@ -51,6 +54,14 @@ std::string render_snippet(const Snippet& snippet, bool color) {
   return out;
 }
 
+std::expected<unsigned, std::string> parse_threads(std::string_view value) {
+  try {
+    return resolve_threads(value);
+  } catch (const std::invalid_argument& e) {
+    return std::unexpected(e.what());
+  }
+}
+
 std::expected<std::size_t, std::string> parse_count(std::string_view flag, std::string_view value) {
   std::size_t number = 0;
   const char* const end = value.data() + value.size();
@@ -60,6 +71,44 @@ std::expected<std::size_t, std::string> parse_count(std::string_view flag, std::
                            std::string(value) + "\"");
   }
   return number;
+}
+
+std::string mebibytes(uint64_t bytes) {
+  return std::format("{:.2f} MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
+}
+
+int run_index(const IndexArgs& args, std::ostream& out, std::ostream& err) {
+  BuildStats build;
+  auto index = build_index(args.corpus, {.threads = args.threads}, &build);
+  if (!index) {
+    err << "error: " << index.error() << "\n";
+    return 1;
+  }
+  const auto written = write_index(*index, args.out, {.compress = args.compress});
+  if (!written) {
+    err << "error: " << written.error() << "\n";
+    return 1;
+  }
+
+  out << std::format(
+      "Indexed {} with {} thread(s)\n"
+      "  docs:      {}\n"
+      "  terms:     {}\n"
+      "  postings:  {}\n"
+      "  scan:      {:.2f} s\n"
+      "  tokenize:  {:.2f} s\n"
+      "  merge:     {:.2f} s\n"
+      "  write:     {:.2f} s\n"
+      "  file:      {} ({}, {})\n",
+      args.corpus.string(), build.threads_used, build.docs, build.terms, build.postings,
+      build.scan_s, build.tokenize_s, build.merge_s, written->write_s,
+      mebibytes(written->file_bytes), args.out.string(), args.compress ? "gap + VByte" : "raw");
+  return 0;
+}
+
+int usage_error(std::string_view message, std::ostream& err) {
+  err << "error: " << message << "\n\n" << kUsage;
+  return 1;
 }
 
 int run_query(const QueryArgs& args, std::ostream& out, std::ostream& err, bool color) {
@@ -135,11 +184,9 @@ std::expected<QueryArgs, std::string> parse_query_args(std::span<const std::stri
       parsed.corpus = value;
       saw_corpus = true;
     } else if (arg == "--threads") {
-      try {
-        parsed.threads = resolve_threads(value);
-      } catch (const std::invalid_argument& e) {
-        return std::unexpected(e.what());
-      }
+      const auto threads = parse_threads(value);
+      if (!threads) return std::unexpected(threads.error());
+      parsed.threads = *threads;
     } else if (arg == "--rank") {
       if (value == "bm25") {
         parsed.mode = RankMode::BM25;
@@ -164,6 +211,40 @@ std::expected<QueryArgs, std::string> parse_query_args(std::span<const std::stri
   return parsed;
 }
 
+std::expected<IndexArgs, std::string> parse_index_args(std::span<const std::string_view> args) {
+  IndexArgs parsed;
+  bool saw_corpus = false;
+  bool saw_out = false;
+
+  for (std::size_t i = 0; i < args.size(); ++i) {
+    const std::string_view arg = args[i];
+    if (!arg.starts_with('-')) {
+      if (saw_corpus) return std::unexpected("only one corpus directory can be given");
+      parsed.corpus = arg;
+      saw_corpus = true;
+    } else if (arg == "--no-compress") {
+      parsed.compress = false;
+    } else if (arg == "-o" || arg == "--threads") {
+      if (i + 1 >= args.size()) return std::unexpected(std::string(arg) + " needs a value");
+      const std::string_view value = args[++i];
+      if (arg == "-o") {
+        parsed.out = value;
+        saw_out = true;
+        continue;
+      }
+      const auto threads = parse_threads(value);
+      if (!threads) return std::unexpected(threads.error());
+      parsed.threads = *threads;
+    } else {
+      return std::unexpected("unknown option \"" + std::string(arg) + "\"");
+    }
+  }
+
+  if (!saw_corpus) return std::unexpected("missing corpus directory");
+  if (!saw_out) return std::unexpected("-o <index file> is required");
+  return parsed;
+}
+
 int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostream& err,
             bool color) {
   if (args.empty()) {
@@ -175,17 +256,17 @@ int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostr
     out << kUsage;
     return 0;
   }
-  if (command != "query") {
-    err << "error: unknown command \"" << command << "\"\n\n" << kUsage;
-    return 1;
+  if (command == "index") {
+    const auto parsed = parse_index_args(args.subspan(1));
+    if (!parsed) return usage_error(parsed.error(), err);
+    return run_index(*parsed, out, err);
   }
-
-  const auto parsed = parse_query_args(args.subspan(1));
-  if (!parsed) {
-    err << "error: " << parsed.error() << "\n\n" << kUsage;
-    return 1;
+  if (command == "query") {
+    const auto parsed = parse_query_args(args.subspan(1));
+    if (!parsed) return usage_error(parsed.error(), err);
+    return run_query(*parsed, out, err, color);
   }
-  return run_query(*parsed, out, err, color);
+  return usage_error("unknown command \"" + std::string(command) + "\"", err);
 }
 
 }  // namespace mse

@@ -78,3 +78,46 @@ A real fix has to stop the work from growing with the number of workers, for exa
 dictionary or sorted runs merged in one pass (the same structure the bounded-memory SPIMI build in
 Phase 9 needs). Small tweaks to the current merge would save maybe a quarter of it, so the current
 design is kept and this limit is reported as it is.
+
+
+## B2: index size (laptop, `main` profile)
+
+Source: `benchmarks/results/laptop/b2_size-main.csv` and `b2_terms-main.csv`
+(`tools/run_benchmarks.sh b2 --machine laptop --profile main`). Sizes do not depend on the machine.
+
+| | Size | Compared with the corpus |
+|---|---:|---:|
+| Corpus text (`part-*.tsv`) | 1,513.1 MiB | 100% |
+| Index file, raw postings | 697.9 MiB | 46.1% |
+| Index file, gap + VByte postings | 228.4 MiB | 15.1% |
+
+- 150,000 docs, 1,467,863 terms, 84,624,579 postings.
+- Postings alone: 645.6 MiB raw (8 bytes each) against 176.2 MiB compressed, which is **3.66x
+  smaller** and 2.18 bytes per posting.
+- The whole file is 3.06x smaller, not 3.66x, because the rest of the file does not
+  shrink: the file minus its postings is 52.2 MiB, of which the term table alone is
+  1,467,863 x 24 bytes = 33.6 MiB.
+
+### Why a common word costs about 1 byte per gap
+
+A gap is the distance between two doc ids in a list. A word in most docs has gaps of 1, 2 or 3, which
+fit in one byte (anything below 128 does). A rare word has few postings spread over 150,000 docs, so
+its gaps are large and need two or three bytes. The table shows the term at several ranks of document
+frequency (rank 1 is the term in the most docs):
+
+| df rank | Term | df | Bytes per gap | Bytes per posting (gap + tf) |
+|---:|---|---:|---:|---:|
+| 1 | `to` | 142,023 | 1.00 | 2.07 |
+| 2 | `the` | 141,322 | 1.00 | 2.32 |
+| 3 | `of` | 140,423 | 1.00 | 2.14 |
+| 10 | `was` | 128,116 | 1.00 | 2.02 |
+| 100 | `then` | 63,322 | 1.00 | 2.00 |
+| 1000 | `growth` | 14,773 | 1.00 | 2.00 |
+| 10000 | `dynasties` | 1,127 | 1.27 | 2.27 |
+| 100000 | `romola` | 22 | 2.00 | 3.00 |
+| 1000000 | `kalakajoro` | 1 | 3.00 | 4.00 |
+
+The term frequency adds one byte per posting while tf is below 128, which holds for most terms, so
+dense lists settle near 2 bytes per posting. The commonest words go over it in long articles: `the`
+needs a second byte for tf in 32% of its postings, which is why it costs 2.32 bytes per posting and
+not 2. Rare terms cost 3 to 4 bytes because their gaps are large. Raw postings always cost 8.

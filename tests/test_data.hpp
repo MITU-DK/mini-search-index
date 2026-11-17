@@ -10,4 +10,9 @@ inline std::filesystem::path tiny_corpus_dir() {
   return std::filesystem::path(MSE_TEST_DATA_DIR) / "tiny_corpus";
 }
 
+// 4 docs in which only "machine" and "learning" occur in 3 or more docs (the spell-check fixture).
+inline std::filesystem::path spell_corpus_dir() {
+  return std::filesystem::path(MSE_TEST_DATA_DIR) / "spell_corpus";
+}
+
 }  // namespace mse

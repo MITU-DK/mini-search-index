@@ -14,6 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MIB = 2**20
+kSpellNodeSize, kSpellEdgeSize = 12, 8  # a tree of n nodes has n - 1 edges: 20 n - 8 bytes
 
 
 def read_csv(path):
@@ -252,6 +253,7 @@ def section_b6(results, machine, profile):
     t50, t95 = float(tree["p50_us"]), float(tree["p95_us"])
     accuracy = float(tree["accuracy"])
     b2 = read_csv(results / f"b2_size-{profile}.csv")[0]
+    nodes = (int(b2["vbyte_spell_bytes"]) + kSpellEdgeSize) // (kSpellNodeSize + kSpellEdgeSize)
     spell_note = ""
     if "vbyte_spell_bytes" in b2:
         spell_note = (
@@ -259,6 +261,7 @@ def section_b6(results, machine, profile):
             f"built in {float(b2['spell_build_s']):.1f} s when the index is written (B2), so opening "
             f"the index has nothing to build.\n"
         )
+    # the tree has n nodes of 12 bytes and n - 1 edges of 8 bytes
     return f"""## B6: spell check, brute force vs BK-tree ({machine}, `{profile}` index)
 
 Source: `benchmarks/results/{machine}/b6_spell-{profile}.csv` (`tools/run_benchmarks.sh b6 --machine
@@ -270,14 +273,23 @@ percentiles are nearest-rank over the {count * 5} timings. Both methods use the 
 same candidate terms (those in at least 3 docs); the benchmark stops if they ever give different
 answers, and they never did.
 
-| Method | p50 (µs) | p95 (µs) | Accuracy |
-|---|---:|---:|---:|
-| brute force | {fmt(b50)} | {fmt(b95)} | {100 * float(brute["accuracy"]):.1f}% |
-| BK-tree | {fmt(t50)} | {fmt(t95)} | {100 * accuracy:.1f}% |
+| Method | p50 (µs) | p95 (µs) | Accuracy | Edit distances computed per typo |
+|---|---:|---:|---:|---:|
+| brute force | {fmt(b50)} | {fmt(b95)} | {100 * float(brute["accuracy"]):.1f}% | {float(brute["avg_distance_calls"]):,.0f} |
+| BK-tree | {fmt(t50)} | {fmt(t95)} | {100 * accuracy:.1f}% | {float(tree["avg_distance_calls"]):,.0f} |
 
-- The BK-tree answers **{b50 / t50:.0f}x faster at the median and {b95 / t95:.0f}x faster at p95**: it
-  compares the word with only the part of the tree that the triangle inequality cannot rule out,
-  where brute force compares it with every candidate term of a similar length.
+- The BK-tree answers **{b50 / t50:.1f}x faster at the median and {b95 / t95:.1f}x faster at p95**. That
+  is a real gain but a modest one, and it is not the "thousands of times" that a BK-tree is sometimes
+  said to give. The reason is in the last column: for each typo the tree still computes
+  {float(tree["avg_distance_calls"]):,.0f} edit distances, which is {100 * float(tree["avg_distance_calls"]) / nodes:.0f}% of
+  its {nodes:,} nodes, against {float(brute["avg_distance_calls"]):,.0f} for brute force (which skips terms whose
+  length is too different to be within range, a shortcut the tree does not need). The
+  triangle inequality rules out a subtree only when the distance to its root is far from the edge label,
+  and with a limit of 2 edits on words of 5 or more letters, most of a large vocabulary is "near enough"
+  at some node to be worth looking into. Time per distance is similar for both
+  ({t50 * 1000 / float(tree["avg_distance_calls"]):.0f} ns for the tree against
+  {b50 * 1000 / float(brute["avg_distance_calls"]):.0f} ns for brute force at the median), so the speed-up follows
+  the count.
 {spell_note}- Accuracy is the share of typos for which the suggestion was the word the typo was made from.
   It is the same for both methods because they give the same answers. It is below 100% because the
   rule picks the closest term and then the commonest, and a different, commoner word can be as close as

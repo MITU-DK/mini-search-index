@@ -24,7 +24,8 @@ uint32_t levenshtein(std::string_view a, std::string_view b) {
 
 uint32_t max_edit_distance(std::string_view term) { return term.size() <= 4 ? 1 : 2; }
 
-std::optional<std::string> suggest_brute(const IndexView& index, std::string_view term) {
+std::optional<std::string> suggest_brute(const IndexView& index, std::string_view term,
+                                         uint64_t* distance_calls) {
   if (term.empty()) return std::nullopt;
   const uint32_t limit = max_edit_distance(term);
 
@@ -40,6 +41,7 @@ std::optional<std::string> suggest_brute(const IndexView& index, std::string_vie
                                                                   : term.size() - candidate.size();
     if (length_gap > limit) continue;  // the distance is at least the difference in length
 
+    if (distance_calls != nullptr) ++*distance_calls;
     const uint32_t distance = levenshtein(term, candidate);
     if (distance > limit) continue;
     if (!best || distance < best_distance || (distance == best_distance && df > best_df)) {

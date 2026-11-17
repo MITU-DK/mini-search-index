@@ -110,6 +110,25 @@ TEST(BkTree, BkTreeEqualsBrute) {
   EXPECT_GT(answered, 100);  // the test is meaningless if almost nothing gets a suggestion
 }
 
+TEST(BkTree, TheTreeComparesWithFewerTermsThanBruteForce) {
+  TempDir corpus;
+  write_synthetic_corpus(corpus.path(), 4000, 900, 2, 45);
+  const auto saved = save_index(corpus.path());
+  uint64_t tree_calls = 0;
+  uint64_t brute_calls = 0;
+  const auto header = decode_header(saved->bytes);
+  ASSERT_TRUE(header.has_value());
+  const uint64_t nodes = header->section(Section::SpellNodes).size / kSpellNodeSize;
+  for (const char* word : {"w12x", "w5", "wq3", "w701", "w3w"}) {
+    const uint64_t before = tree_calls;
+    EXPECT_EQ(saved->view->spell_suggest(word, &tree_calls),
+              suggest_brute(*saved->view, word, &brute_calls));
+    EXPECT_GT(tree_calls, before) << word;          // the root is always compared
+    EXPECT_LE(tree_calls - before, nodes) << word;  // and no node is compared twice
+  }
+  EXPECT_LT(tree_calls, brute_calls);
+}
+
 TEST(BkTree, AgreesWithBruteOnTheSpellFixture) {
   const auto saved = save_index(spell_corpus_dir());
   for (const char* word : {"lerning", "machne", "learnnig", "vison", "zzzzzzzz", "machine", "mach",

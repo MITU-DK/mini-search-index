@@ -130,7 +130,8 @@ std::pair<uint32_t, uint32_t> IndexView::prefix_range(std::string_view prefix) c
   return {first, last};
 }
 
-std::optional<std::string> IndexView::spell_suggest(std::string_view term) const {
+std::optional<std::string> IndexView::spell_suggest(std::string_view term,
+                                                    uint64_t* distance_calls) const {
   const std::size_t node_count = spell_nodes_.size() / kSpellNodeSize;
   const std::size_t edge_count = spell_edges_.size() / kSpellEdgeSize;
   if (term.empty() || node_count == 0) return std::nullopt;
@@ -161,6 +162,7 @@ std::optional<std::string> IndexView::spell_suggest(std::string_view term) const
 
     const std::string_view text = term_at(term_index);
     if (text.empty()) continue;  // damaged: nothing can be said about this subtree
+    if (distance_calls != nullptr) ++*distance_calls;
     const uint32_t distance = levenshtein(term, text);
     const uint32_t df = df_at(term_index);
     if (distance <= limit && is_spell_eligible(df) && is_better({distance, df, term_index})) {

@@ -27,6 +27,8 @@ inline bool is_spell_eligible(uint32_t df) { return df >= kSpellMinDf; }
 // The best correction of `term`, or nothing. Only terms in at least kSpellMinDf docs and within
 // max_edit_distance(term) are candidates. The best has the smallest distance, then the most docs,
 // then the alphabetically first term. A word that is itself eligible suggests itself.
-std::optional<std::string> suggest_brute(const IndexView& index, std::string_view term);
+// If `distance_calls` is given, the number of Levenshtein distances computed is added to it.
+std::optional<std::string> suggest_brute(const IndexView& index, std::string_view term,
+                                         uint64_t* distance_calls = nullptr);
 
 }  // namespace mse

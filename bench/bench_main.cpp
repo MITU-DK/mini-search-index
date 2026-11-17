@@ -604,11 +604,23 @@ int command_spell(const Options& options) {
       need(options, "machine") / ("b6_spell-" + need(options, "profile") + ".csv");
   std::filesystem::create_directories(csv_path.parent_path());
   std::ofstream csv(csv_path, std::ios::trunc);
-  csv << "method,p50_us,p95_us,accuracy\n"
+  // How many edit distances each method computes per typo; counted once, outside the timings.
+  uint64_t brute_calls = 0;
+  uint64_t tree_calls = 0;
+  for (const Typo& typo : typos) {
+    (void)mse::suggest_brute(view, typo.typo, &brute_calls);
+    (void)view.spell_suggest(typo.typo, &tree_calls);
+  }
+  const auto per_typo = [&](uint64_t calls) {
+    return static_cast<double>(calls) / static_cast<double>(typos.size());
+  };
+  csv << "method,p50_us,p95_us,accuracy,avg_distance_calls\n"
       << "brute_force," << mse::percentile(brute.microseconds, 50) << ','
-      << mse::percentile(brute.microseconds, 95) << ',' << accuracy_of(brute, typos) << '\n'
+      << mse::percentile(brute.microseconds, 95) << ',' << accuracy_of(brute, typos) << ','
+      << per_typo(brute_calls) << '\n'
       << "bk_tree," << mse::percentile(tree.microseconds, 50) << ','
-      << mse::percentile(tree.microseconds, 95) << ',' << accuracy_of(tree, typos) << '\n';
+      << mse::percentile(tree.microseconds, 95) << ',' << accuracy_of(tree, typos) << ','
+      << per_typo(tree_calls) << '\n';
   if (!csv) throw std::runtime_error("cannot write " + csv_path.string());
   std::cerr << "wrote " << csv_path.string() << "\n";
   return 0;

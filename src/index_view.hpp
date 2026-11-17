@@ -48,7 +48,10 @@ class IndexView {
   // The best correction of `term` found by walking the stored BK-tree, or nullopt if there is
   // none, if the file has no spell data, or if that data is damaged. The answer is always the
   // one suggest_brute (spellcheck.hpp) gives.
-  std::optional<std::string> spell_suggest(std::string_view term) const;
+  // If `distance_calls` is given, the number of Levenshtein distances computed (one per tree node
+  // visited) is added to it.
+  std::optional<std::string> spell_suggest(std::string_view term,
+                                           uint64_t* distance_calls = nullptr) const;
 
   // The terms that start with `prefix` are the entries [first, last) of the term table.
   std::pair<uint32_t, uint32_t> prefix_range(std::string_view prefix) const;

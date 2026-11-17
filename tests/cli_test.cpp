@@ -419,5 +419,22 @@ TEST(Cli, UsageMentionsSearch) {
   EXPECT_NE(run({"--help"}).out.find("msearch search"), std::string::npos);
 }
 
+TEST(Cli, SearchSuggestCommandCompletesPrefixes) {
+  TempDir dir;
+  const std::string index = fixture_index(dir);
+  const CliRun result = run_with_input(
+      {"search", "-i", index}, ":suggest la\n:suggest LEA\n:suggest l\n:suggest zz\n:suggest\n");
+  EXPECT_EQ(result.code, 0) << result.err;
+  EXPECT_NE(result.out.find("Suggestions: lait, lazy\n"), std::string::npos) << result.out;
+  EXPECT_NE(result.out.find("Suggestions: learning\n"), std::string::npos) << result.out;
+  // a 1-letter prefix, a prefix with no match, and no prefix at all
+  std::size_t none = 0;
+  for (std::size_t at = result.out.find("No suggestions."); at != std::string::npos;
+       at = result.out.find("No suggestions.", at + 1)) {
+    ++none;
+  }
+  EXPECT_EQ(none, 3u) << result.out;
+}
+
 }  // namespace
 }  // namespace mse

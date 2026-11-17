@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <system_error>
 
+#include "autocomplete.hpp"
 #include "index_writer.hpp"
 #include "indexer.hpp"
 #include "searcher.hpp"
@@ -31,6 +32,7 @@ constexpr std::string_view kUsage =
     "index builds the index and saves it to a file.\n"
     "query with --corpus builds the index in memory first; with -i it opens a saved index.\n"
     "search opens a saved index once and answers one query per line until the input ends.\n"
+    "In search, \":suggest <prefix>\" completes a word, and \"quit\" ends the session.\n"
     "With -i, --corpus tells where to read the previews from instead of the stored folder.\n"
     "Use \"--\" before the query text if the text itself starts with \"-\".\n";
 
@@ -218,6 +220,15 @@ int run_query(const QueryArgs& args, std::ostream& out, std::ostream& err, bool 
                             : query_saved_index(args, out, err, color);
 }
 
+constexpr std::string_view kSuggestCommand = ":suggest";
+
+std::string format_suggestions(const std::vector<std::string>& terms) {
+  if (terms.empty()) return "No suggestions.\n";
+  std::string out = "Suggestions: ";
+  for (std::size_t i = 0; i < terms.size(); ++i) out += (i > 0 ? ", " : "") + terms[i];
+  return out + "\n";
+}
+
 // One query per input line, until the input ends or a line says "quit". The prompt goes to `err`
 // so that `out` holds nothing but results, even when it is piped.
 int run_search(const QueryArgs& args, std::istream& in, std::ostream& out, std::ostream& err,
@@ -234,6 +245,11 @@ int run_search(const QueryArgs& args, std::istream& in, std::ostream& out, std::
     const std::string_view text = trim(line);
     if (text == "quit" || text == "exit") break;
     if (text.empty()) continue;
+    if (text.starts_with(kSuggestCommand)) {
+      out << format_suggestions(suggest(index->view(), trim(text.substr(kSuggestCommand.size()))))
+          << std::flush;
+      continue;
+    }
     out << answer(index->view(), searcher, args, text, args.corpus.string(), color) << std::flush;
   }
   err << "\n";

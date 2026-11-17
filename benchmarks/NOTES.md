@@ -79,7 +79,7 @@ dictionary or sorted runs merged in one pass (the same structure the bounded-mem
 Phase 9 needs). Small tweaks to the current merge would save maybe a quarter of it, so the current
 design is kept and this limit is reported as it is.
 
-
+<!-- BEGIN b2 -->
 ## B2: index size (laptop, `main` profile)
 
 Source: `benchmarks/results/laptop/b2_size-main.csv` and `b2_terms-main.csv`
@@ -92,11 +92,11 @@ Source: `benchmarks/results/laptop/b2_size-main.csv` and `b2_terms-main.csv`
 | Index file, gap + VByte postings | 228.4 MiB | 15.1% |
 
 - 150,000 docs, 1,467,863 terms, 84,624,579 postings.
-- Postings alone: 645.6 MiB raw (8 bytes each) against 176.2 MiB compressed, which is **3.66x
-  smaller** and 2.18 bytes per posting.
-- The whole file is 3.06x smaller, not 3.66x, because the rest of the file does not
-  shrink: the file minus its postings is 52.2 MiB, of which the term table alone is
-  1,467,863 x 24 bytes = 33.6 MiB.
+- Postings alone: 645.6 MiB raw (8 bytes each) against 176.2 MiB compressed, which is
+  **3.66x smaller** and 2.18 bytes per posting.
+- The whole file is 3.06x smaller, not 3.66x, because the rest of
+  the file does not shrink: the file minus its postings is 52.2 MiB, of which the term
+  table alone is 1,467,863 x 24 bytes = 33.6 MiB.
 
 ### Why a common word costs about 1 byte per gap
 
@@ -118,20 +118,20 @@ frequency (rank 1 is the term in the most docs):
 | 1000000 | `kalakajoro` | 1 | 3.00 | 4.00 |
 
 The term frequency adds one byte per posting while tf is below 128, which holds for most terms, so
-dense lists settle near 2 bytes per posting. The commonest words go over it in long articles: `the`
-needs a second byte for tf in 32% of its postings, which is why it costs 2.32 bytes per posting and
-not 2. Rare terms cost 3 to 4 bytes because their gaps are large. Raw postings always cost 8.
+dense lists settle near 2 bytes per posting. The commonest words go over it in long articles: `the` needs a second byte for tf in 32% of its postings, which is why it costs 2.32 bytes per posting and not 2. Rare terms cost 3 to 4 bytes because their
+gaps are large. Raw postings always cost 8.
+<!-- END b2 -->
 
-
+<!-- BEGIN b3 -->
 ## B3: loading the index, `parse` vs `read` vs `mmap` (laptop, `main` index)
 
-Source: `benchmarks/results/laptop/b3_load-main.csv` (`tools/run_benchmarks.sh b3 --machine laptop
---profile main`). The index is `data/index/main/vbyte.bin` (228 MiB, from B2). Every measurement is
-a fresh process; one discarded round first, then 5 runs per cell. The table shows medians and the
-min to max range of the two times. **Cold** means the file was evicted from the page cache with
-`posix_fadvise(DONTNEED)` just before opening; **warm** means it was already cached. The queries are
-the titles of 1000 random docs (seed 42), so "first query" is one fixed title, the same in every run.
-The time shown for a query is the search itself; the previews (snippets) are not included.
+Source: `benchmarks/results/laptop/b3_load-main.csv` (`tools/run_benchmarks.sh b3 --machine
+laptop --profile main`). The index is `data/index/main/vbyte.bin` (228 MiB, from B2).
+Every measurement is a fresh process; one discarded round first, then 5 runs per cell. The table shows
+medians and the min to max range of the two times. **Cold** means the file was evicted from the page
+cache with `posix_fadvise(DONTNEED)` just before opening; **warm** means it was already cached. The
+queries are the titles of 1000 random docs (seed 42), so "first query" is one fixed title, the same in
+every run. The time shown for a query is the search itself; the previews (snippets) are not included.
 
 | Cache | Mode | Open (ms) | Range | First query (ms) | Range | Open + first query (ms) | RSS after open (MiB) | RSS after 1000 queries (MiB) | Major faults, first query | Minor faults, first query |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -144,30 +144,70 @@ The time shown for a query is the search itself; the previews (snippets) are not
 
 ### What the three modes show
 
-- **`parse` is slow because of decoding, not disk.** Opening takes 1,131 ms warm and 1,282 ms cold.
-  `read` also reads the whole file into memory and takes 111 ms warm, so decoding the postings into
-  hash maps costs about **1,020 ms**, which is 80% of the cold `parse` time. The disk
-  accounts for only about 151 ms (cold minus warm). `parse` also needs 812 MiB of memory,
-  3.6 times the size of the file, because hash maps and vectors take far more space than the
-  packed bytes.
-- **`read` is a plain copy.** It spends its 111 ms warm copying 228 MiB into a buffer and nothing
-  decoding. Cold, the disk adds about 142 ms. Its memory is the size of the file.
-- **`mmap` opens in 0.016 ms warm and 0.537 ms cold**, because opening only maps
-  the file and checks the header. Nothing is read until a query touches it, and the memory after opening
-  is 4 MiB (only the program itself).
+- **`parse` is slow because of decoding, not disk.** Opening takes 1,131 ms warm and 1,282 ms
+  cold. `read` also reads the whole file into memory and takes 111 ms warm, so decoding the
+  postings into hash maps costs about **1,020 ms**, which is 80% of the
+  cold `parse` time. The disk accounts for only about 151 ms (cold minus warm). `parse` also
+  needs 812 MiB of memory, 3.6 times the size of the file, because
+  hash maps and vectors take far more space than the packed bytes.
+- **`read` is a plain copy.** It spends its 111 ms warm copying 228 MiB into a buffer
+  and nothing decoding. Cold, the disk adds about 142 ms. Its memory is the size of the file.
+- **`mmap` opens in 0.016 ms warm and 0.537
+  ms cold**, because opening only maps the file and checks the header. Nothing is read until a query
+  touches it, and the memory after opening is 4 MiB
+  (only the program itself).
 - **The cost moves to the first query.** Warm, the first `mmap` query takes 1.13 ms against
-  0.81 ms for `parse`, which is 0.32 ms more. Mapped pages that are already in the page cache still
-  have to be entered into this process's page table, one minor page fault each: 350
-  minor faults against 313 for `parse` (37 more; the rest is setup that every mode shares). Cold, the first
-  query takes **11.9 ms with 32 major faults**, because those pages must come from disk. The `parse` and `read` first
-  queries take under a millisecond, because everything is already in memory: they paid before the query, at open.
+  0.811 ms for `parse`, which is 0.32 ms more. Mapped pages
+  that are already in the page cache still have to be entered into this process's page table, one minor
+  page fault each: 350 minor faults against
+  313 for `parse` (37 more; the rest is setup
+  that every mode shares). Cold, the first query takes **11.9 ms with
+  32 major faults**, because those pages must come
+  from disk. The `parse` and `read` first queries take under a millisecond, because everything is
+  already in memory: they paid before the query, at open.
 - **Open plus first query**, which is how long a user waits for the first answer from a new process:
-  `mmap` 12.4 ms cold and 1.15 ms warm, `read` 254 ms and
-  112 ms, `parse` 1,283 ms and 1,132 ms.
-- **After 1000 queries** `mmap` has 133 MiB resident, all of it file pages that the
-  page cache shares with other processes, against 819 MiB of private memory for `parse`. 1000 random
-  title queries touch about 58% of the file, which is why the memory grows.
+  `mmap` 12.4 ms cold and 1.15 ms warm, `read`
+  254 ms and 112 ms, `parse` 1,283
+  ms and 1,132 ms.
+- **After 1000 queries** `mmap` has 133 MiB resident,
+  all of it file pages that the page cache shares with other processes, against
+  819 MiB of private memory for `parse`. 1000 random
+  title queries touch about 58% of the
+  file, which is why the memory grows.
 
-Limits of these numbers: one index (the `main` corpus) on one laptop; the first query is a single title,
-so its cold time depends on which pages that title happens to need; eviction with `fadvise` drops this
-file only (not a full `drop_caches`); times are for the search only, without previews.
+Limits of these numbers: one index on one machine; the first query is a single title, so its cold time
+depends on which pages that title happens to need; eviction with `fadvise` drops this file only (not a
+full `drop_caches`); times are for the search only, without previews.
+<!-- END b3 -->
+
+<!-- BEGIN b7 -->
+## B7: autocomplete, sorted table vs trie (laptop, `main` index)
+
+Source: `benchmarks/results/laptop/b7_suggest-main.csv` (`tools/run_benchmarks.sh b7 --machine
+laptop --profile main`). 1000 seeded prefixes (2 to 5 leading bytes of random terms in at least
+10 docs), each asked 5 times after one unrecorded pass, so the times are warm. Percentiles are
+nearest-rank over the 5000 timings. The sorted table is the production path: a binary search over the
+mapped term table, then the best 5 of the range. The trie is built in memory from the same terms and
+keeps the best 5 terms in every node.
+
+| Method | Build (ms) | Extra memory (MiB) | p50 (µs) | p95 (µs) |
+|---|---:|---:|---:|---:|
+| sorted table | 0 | 0 | 2.42 | 27.5 |
+| trie | 352 | 216 | 0.582 | 1.16 |
+
+- The trie answers **4.2x faster at the median and 24x faster at p95**.
+- It has to be built from every term before the first query: 352 ms here, on
+  every start of the program. That is the cost mmap was chosen to avoid (B3: the index opens in well
+  under a millisecond).
+- It needs 216 MiB of memory on top of the index, about 0.9 times the size of
+  the 228 MiB index file itself, because it has one node per distinct prefix of every term.
+- The table needs nothing extra: no build, no memory beyond the pages it touches.
+
+Why the sorted table stays the production path: 27.5 µs at p95 is far below anything a person
+can notice while typing, so the trie's speed buys nothing visible, while its start-up time and memory
+are real costs. The table's slower tail is probably the 2-letter prefixes, which cover very large ranges
+of the term table; that was not measured separately.
+
+Limits: timings are per call with `steady_clock`, which adds a few tens of nanoseconds to every
+sample, noticeable only for the trie; one machine, one index, warm only.
+<!-- END b7 -->

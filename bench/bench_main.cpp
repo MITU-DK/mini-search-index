@@ -8,6 +8,8 @@
 //
 //   msearch-bench queries --index F --count N --seed S --out FILE
 //                                                 known-item queries: the titles of N random docs
+//   msearch-bench suggest --index F --n N --seed S --machine M --profile P
+//                                                 autocomplete: sorted table vs trie (B7)
 //   msearch-bench load --index F --mode parse|read|mmap --cache cold|warm --queries Q
 //                      --machine M --profile P --commit H [--record yes|no]
 //                                                 one load measurement, in this fresh process
@@ -28,6 +30,7 @@
 #include <thread>
 #include <vector>
 
+#include "autocomplete.hpp"
 #include "byte_source.hpp"
 #include "index.hpp"
 #include "index_writer.hpp"
@@ -35,7 +38,9 @@
 #include "parsed_loader.hpp"
 #include "procstats.hpp"
 #include "searcher.hpp"
+#include "stats.hpp"
 #include "thread_sweep.hpp"
+#include "trie.hpp"
 #include "varint.hpp"
 
 namespace {
@@ -375,6 +380,81 @@ int command_load(const Options& options) {
   return 0;
 }
 
+// ---- B7: autocomplete ----
+
+// 2 to 5 leading bytes of seeded random terms that occur in at least 10 docs.
+std::vector<std::string> pick_prefixes(const mse::IndexView& view, unsigned count, uint32_t seed) {
+  std::mt19937 rng(seed);
+  std::vector<std::string> prefixes;
+  for (std::size_t attempts = 0; prefixes.size() < count; ++attempts) {
+    if (attempts > std::size_t{count} * 10000 + 1000000) {
+      throw std::runtime_error("the index has too few terms with df >= 10 and 2 or more bytes");
+    }
+    const auto term = static_cast<uint32_t>(rng() % view.num_terms());
+    const std::string_view text = view.term_at(term);
+    const std::size_t length = 2 + rng() % 4;
+    if (view.df_at(term) < 10 || text.size() < 2) continue;
+    prefixes.emplace_back(text.substr(0, std::min(length, text.size())));
+  }
+  return prefixes;
+}
+
+constexpr unsigned kSuggestPasses = 5;
+
+// Latencies in microseconds of `ask` over the prefixes: one unrecorded pass to load pages, then
+// kSuggestPasses recorded ones, all pooled.
+template <class Ask>
+std::vector<double> time_suggestions(const std::vector<std::string>& prefixes, const Ask& ask) {
+  std::size_t sink = 0;
+  for (const std::string& prefix : prefixes) sink += ask(prefix).size();
+  std::vector<double> microseconds;
+  for (unsigned pass = 0; pass < kSuggestPasses; ++pass) {
+    for (const std::string& prefix : prefixes) {
+      const auto start = std::chrono::steady_clock::now();
+      sink += ask(prefix).size();
+      microseconds.push_back(milliseconds_since(start) * 1000.0);
+    }
+  }
+  if (sink == 0) throw std::runtime_error("no prefix matched any term");  // also keeps `sink` used
+  return microseconds;
+}
+
+int command_suggest(const Options& options) {
+#ifndef NDEBUG
+  std::cerr << "error: this is not a release build; its numbers would mean nothing.\n";
+  return 1;
+#endif
+  const auto index = mse::Index::open(need(options, "index"), mse::LoadMode::Mmap);
+  if (!index) throw std::runtime_error(index.error());
+  const mse::IndexView& view = index->view();
+  const std::vector<std::string> prefixes =
+      pick_prefixes(view, parse_repeat(get_or(options, "n", "1000")),
+                    static_cast<uint32_t>(std::stoul(get_or(options, "seed", "42"))));
+
+  const std::vector<double> table = time_suggestions(
+      prefixes, [&](const std::string& prefix) { return mse::suggest(view, prefix); });
+
+  const auto build_start = std::chrono::steady_clock::now();
+  const mse::Trie trie = mse::Trie::build(view);
+  const double build_ms = milliseconds_since(build_start);
+  const std::vector<double> trie_times =
+      time_suggestions(prefixes, [&](const std::string& prefix) { return trie.suggest(prefix); });
+
+  const std::filesystem::path csv_path =
+      std::filesystem::path(get_or(options, "results", "benchmarks/results")) /
+      need(options, "machine") / ("b7_suggest-" + need(options, "profile") + ".csv");
+  std::filesystem::create_directories(csv_path.parent_path());
+  std::ofstream csv(csv_path, std::ios::trunc);
+  csv << "method,build_ms,extra_memory_bytes,p50_us,p95_us\n"
+      << "sorted_table,0,0," << mse::percentile(table, 50) << ',' << mse::percentile(table, 95)
+      << '\n'
+      << "trie," << build_ms << ',' << trie.memory_bytes() << ',' << mse::percentile(trie_times, 50)
+      << ',' << mse::percentile(trie_times, 95) << '\n';
+  if (!csv) throw std::runtime_error("cannot write " + csv_path.string());
+  std::cerr << "wrote " << csv_path.string() << "\n";
+  return 0;
+}
+
 int command_sweep(const Options& options) {
   for (const unsigned threads : resolve_sweep(options)) std::cout << threads << "\n";
   return 0;
@@ -393,6 +473,7 @@ int main(int argc, char** argv) {
     if (command == "size") return command_size(options);
     if (command == "queries") return command_queries(options);
     if (command == "load") return command_load(options);
+    if (command == "suggest") return command_suggest(options);
     throw std::invalid_argument("unknown command \"" + std::string(command) + "\"");
   } catch (const std::exception& e) {
     std::cerr << "error: " << e.what() << "\n";

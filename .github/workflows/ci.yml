@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        preset: [release, asan, tsan]
+    runs-on: ${{ matrix.os }}
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: sudo apt-get update && sudo apt-get install -y g++-14 ninja-build cmake
+
+      # TSan fails to start with the high ASLR entropy that Ubuntu 24.04 uses by default.
+      - name: Lower ASLR entropy for TSan
+        if: matrix.preset == 'tsan'
+        run: sudo sysctl vm.mmap_rnd_bits=28
+
+      - name: Configure
+        run: cmake --preset ${{ matrix.preset }}
+
+      - name: Build
+        run: cmake --build --preset ${{ matrix.preset }}
+
+      - name: Test
+        run: ctest --preset ${{ matrix.preset }}

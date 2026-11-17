@@ -88,15 +88,16 @@ Source: `benchmarks/results/laptop/b2_size-main.csv` and `b2_terms-main.csv`
 | | Size | Compared with the corpus |
 |---|---:|---:|
 | Corpus text (`part-*.tsv`) | 1,513.1 MiB | 100% |
-| Index file, raw postings | 697.9 MiB | 46.1% |
-| Index file, gap + VByte postings | 228.4 MiB | 15.1% |
+| Index file, raw postings | 705.4 MiB | 46.6% |
+| Index file, gap + VByte postings | 236.0 MiB | 15.6% |
 
 - 150,000 docs, 1,467,863 terms, 84,624,579 postings.
 - Postings alone: 645.6 MiB raw (8 bytes each) against 176.2 MiB compressed, which is
   **3.66x smaller** and 2.18 bytes per posting.
-- The whole file is 3.06x smaller, not 3.66x, because the rest of
-  the file does not shrink: the file minus its postings is 52.2 MiB, of which the term
+- The whole file is 2.99x smaller, not 3.66x, because the rest of
+  the file does not shrink: the file minus its postings is 59.8 MiB, of which the term
   table alone is 1,467,863 x 24 bytes = 33.6 MiB.
+- The BK-tree for spell checking is 7.5 MiB of that file (3.2%). Building it took 0.7 s, done once when the index is written.
 
 ### Why a common word costs about 1 byte per gap
 
@@ -200,7 +201,7 @@ keeps the best 5 terms in every node.
   every start of the program. That is the cost mmap was chosen to avoid (B3: the index opens in well
   under a millisecond).
 - It needs 216 MiB of memory on top of the index, about 0.9 times the size of
-  the 228 MiB index file itself, because it has one node per distinct prefix of every term.
+  the 236 MiB index file itself, because it has one node per distinct prefix of every term.
 - The table needs nothing extra: no build, no memory beyond the pages it touches.
 
 Why the sorted table stays the production path: 27.5 µs at p95 is far below anything a person
@@ -211,3 +212,45 @@ of the term table; that was not measured separately.
 Limits: timings are per call with `steady_clock`, which adds a few tens of nanoseconds to every
 sample, noticeable only for the trie; one machine, one index, warm only.
 <!-- END b7 -->
+
+<!-- BEGIN b6 -->
+## B6: spell check, brute force vs BK-tree (laptop, `main` index)
+
+Source: `benchmarks/results/laptop/b6_spell-main.csv` (`tools/run_benchmarks.sh b6 --machine
+laptop --profile main`) and the typos in `benchmarks/queries/typos-main.tsv`. The typos are
+200 seeded single edits (an insertion, deletion, substitution or swap of neighbours, one per
+word) of words of 5 or more letters that occur in at least 50 docs, and a typo that is itself an indexed
+word was not used. Each typo is asked 5 times after one unrecorded pass, so the times are warm;
+percentiles are nearest-rank over the 1000 timings. Both methods use the same index and the
+same candidate terms (those in at least 3 docs); the benchmark stops if they ever give different
+answers, and they never did.
+
+| Method | p50 (µs) | p95 (µs) | Accuracy | Edit distances computed per typo |
+|---|---:|---:|---:|---:|
+| brute force | 33,657 | 40,266 | 73.0% | 205,261 |
+| BK-tree | 13,225 | 18,471 | 73.0% | 57,475 |
+
+- The BK-tree answers **2.5x faster at the median and 2.2x faster at p95**. That
+  is a real gain but a modest one, and it is not the "thousands of times" that a BK-tree is sometimes
+  said to give. The reason is in the last column: for each typo the tree still computes
+  57,475 edit distances, which is 15% of
+  its 395,539 nodes, against 205,261 for brute force (which skips terms whose
+  length is too different to be within range, a shortcut the tree does not need). The
+  triangle inequality rules out a subtree only when the distance to its root is far from the edge label,
+  and with a limit of 2 edits on words of 5 or more letters, most of a large vocabulary is "near enough"
+  at some node to be worth looking into. Time per distance is 230 ns
+  for the tree against 164 ns for brute force at the median: the
+  tree pays somewhat more for each one, probably because it jumps around the file where brute force
+  reads the term table in order (that was not measured separately), so the speed-up is smaller than
+  the drop in the count.
+- The tree is stored in the index file: 7.5 MiB, built in 0.7 s when the index is written (B2), so opening the index has nothing to build.
+- Accuracy is the share of typos for which the suggestion was the word the typo was made from.
+  It is the same for both methods because they give the same answers. It is below 100% because the
+  rule picks the closest term and then the commonest, and a different, commoner word can be as close as
+  the original: that is what the rule does, not a fault in the tree. A swap of two letters counts as
+  two edits, so those typos compete with every word one edit away.
+
+Limits: one index, one machine, warm only; typos made by random single edits are easier than real
+human typos, which often have two or more errors; accuracy is measured against the word the typo was
+made from, which is not always the word a person meant.
+<!-- END b6 -->

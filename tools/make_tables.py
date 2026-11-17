@@ -286,10 +286,11 @@ answers, and they never did.
   length is too different to be within range, a shortcut the tree does not need). The
   triangle inequality rules out a subtree only when the distance to its root is far from the edge label,
   and with a limit of 2 edits on words of 5 or more letters, most of a large vocabulary is "near enough"
-  at some node to be worth looking into. Time per distance is similar for both
-  ({t50 * 1000 / float(tree["avg_distance_calls"]):.0f} ns for the tree against
-  {b50 * 1000 / float(brute["avg_distance_calls"]):.0f} ns for brute force at the median), so the speed-up follows
-  the count.
+  at some node to be worth looking into. Time per distance is {t50 * 1000 / float(tree["avg_distance_calls"]):.0f} ns
+  for the tree against {b50 * 1000 / float(brute["avg_distance_calls"]):.0f} ns for brute force at the median: the
+  tree pays somewhat more for each one, probably because it jumps around the file where brute force
+  reads the term table in order (that was not measured separately), so the speed-up is smaller than
+  the drop in the count.
 {spell_note}- Accuracy is the share of typos for which the suggestion was the word the typo was made from.
   It is the same for both methods because they give the same answers. It is below 100% because the
   rule picks the closest term and then the commonest, and a different, commoner word can be as close as

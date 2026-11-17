@@ -126,10 +126,13 @@ std::expected<void, std::string> merge_runs(std::span<const fs::path> paths,
 // the entries of the document table (the DocInfo, the corpus's own DocRef, an average title).
 constexpr uint64_t kThreadReserve = 16 << 20;
 constexpr uint64_t kTitleBytes = 24;
+// And for the process itself: the writer's copy of the document table, the list of spell-check
+// terms, the buffers of the merge, and the allocator's slack after the workers are done.
+constexpr uint64_t kBaseReserve = 64 << 20;
 
 uint64_t worker_budget_for(uint64_t budget, unsigned workers, std::size_t docs) {
-  const uint64_t fixed =
-      docs * (sizeof(DocInfo) + sizeof(DocRef) + kTitleBytes) + uint64_t{workers} * kThreadReserve;
+  const uint64_t fixed = kBaseReserve + docs * (sizeof(DocInfo) + sizeof(DocRef) + kTitleBytes) +
+                         uint64_t{workers} * kThreadReserve;
   // With a budget too small to cover that, the workers get half of it, and the process is over.
   const uint64_t left = std::max(budget > fixed ? budget - fixed : 0, budget / 2);
   return std::max<uint64_t>(1, left / workers);

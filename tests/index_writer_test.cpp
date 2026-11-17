@@ -6,6 +6,7 @@
 #include <fstream>
 #include <iterator>
 
+#include "file_bytes.hpp"
 #include "index_format.hpp"
 #include "indexer.hpp"
 #include "parsed_loader.hpp"
@@ -17,25 +18,11 @@ namespace mse {
 namespace {
 
 namespace fs = std::filesystem;
-using Bytes = std::vector<std::byte>;
 
 InMemoryIndex build(const fs::path& corpus, unsigned threads = 1) {
   auto index = build_index(corpus, {.threads = threads});
   if (!index) throw std::runtime_error(index.error());
   return *std::move(index);
-}
-
-Bytes read_file(const fs::path& path) {
-  std::ifstream in(path, std::ios::binary);
-  const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  return Bytes(reinterpret_cast<const std::byte*>(text.data()),
-               reinterpret_cast<const std::byte*>(text.data()) + text.size());
-}
-
-void write_file(const fs::path& path, const Bytes& bytes) {
-  std::ofstream out(path, std::ios::binary | std::ios::trunc);
-  out.write(reinterpret_cast<const char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()));
 }
 
 WriteStats write_or_die(const InMemoryIndex& index, const fs::path& out, bool compress = true) {
@@ -317,7 +304,7 @@ uint64_t section_offset(const Bytes& file, int section) {
 TEST(IndexLoader, ASmallOrMissingFileIsAnError) {
   TempDir dir;
   EXPECT_FALSE(load_parsed(dir.path() / "missing.bin").has_value());
-  write_file(dir.path() / "empty.bin", {});
+  write_file(dir.path() / "empty.bin", Bytes{});
   EXPECT_FALSE(load_parsed(dir.path() / "empty.bin").has_value());
   write_file(dir.path() / "small.bin", Bytes(100));
   EXPECT_FALSE(load_parsed(dir.path() / "small.bin").has_value());

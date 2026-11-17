@@ -10,8 +10,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "constants.hpp"
+#include "posting.hpp"
 
 namespace mse {
 
@@ -116,6 +118,13 @@ TermEntry decode_term_entry(std::span<const std::byte, kTermEntrySize> in);
 // The bytes of one section of `file`. Only valid after decode_header accepted the file.
 std::span<const std::byte> section_bytes(std::span<const std::byte> file, const Header& header,
                                          Section section);
+
+// Decodes one term's postings block (raw or gap + VByte) into `out`, replacing its contents, and
+// checks the list: `df` postings, tf >= 1, docs strictly increasing and below `num_docs`.
+// On failure `out` is left empty.
+[[nodiscard]] std::expected<void, std::string> decode_postings_block(
+    std::span<const std::byte> block, uint32_t df, bool compressed, uint32_t num_docs,
+    std::vector<Posting>& out);
 
 // The `size` bytes at `offset` inside `data`, or an error naming `what` if they are not all there.
 [[nodiscard]] std::expected<std::span<const std::byte>, std::string> checked_range(

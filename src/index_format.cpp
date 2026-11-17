@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 
+#include "varint.hpp"
+
 namespace mse {
 namespace {
 
@@ -48,6 +50,31 @@ std::expected<void, std::string> check_section_places(const Header& header) {
       return std::unexpected(name + " reaches past the end of the file");
     }
     previous_end = ref.offset + ref.size;
+  }
+  return {};
+}
+
+std::expected<void, std::string> decode_raw(std::span<const std::byte> block, uint32_t df,
+                                            std::vector<Posting>& out) {
+  if (block.size() != uint64_t{df} * kRawPostingSize) {
+    return std::unexpected("raw postings block does not hold exactly df postings");
+  }
+  out.reserve(df);
+  for (std::size_t at = 0; at < block.size(); at += kRawPostingSize) {
+    out.push_back({load_le<uint32_t>(block, at), load_le<uint32_t>(block, at + 4)});
+  }
+  return {};
+}
+
+std::expected<void, std::string> check_list(const std::vector<Posting>& list, uint32_t num_docs) {
+  for (std::size_t i = 0; i < list.size(); ++i) {
+    if (list[i].tf == 0) return std::unexpected("a posting has a frequency of 0");
+    if (list[i].doc >= num_docs) {
+      return std::unexpected("a posting names a doc that is not in the index");
+    }
+    if (i > 0 && list[i].doc <= list[i - 1].doc) {
+      return std::unexpected("postings are not in increasing doc order");
+    }
   }
   return {};
 }
@@ -136,6 +163,17 @@ std::span<const std::byte> section_bytes(std::span<const std::byte> file, const 
                                          Section section) {
   const SectionRef& ref = header.section(section);
   return file.subspan(ref.offset, ref.size);
+}
+
+std::expected<void, std::string> decode_postings_block(std::span<const std::byte> block,
+                                                       uint32_t df, bool compressed,
+                                                       uint32_t num_docs,
+                                                       std::vector<Posting>& out) {
+  out.clear();
+  auto ok = compressed ? decode_postings(block, df, out) : decode_raw(block, df, out);
+  if (ok) ok = check_list(out, num_docs);
+  if (!ok) out.clear();
+  return ok;
 }
 
 std::expected<std::span<const std::byte>, std::string> checked_range(

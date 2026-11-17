@@ -67,32 +67,6 @@ std::expected<void, std::string> load_docs(const Context& ctx, InMemoryIndex& in
   return {};
 }
 
-// Reads a raw block of {u32 doc, u32 tf} pairs.
-std::expected<void, std::string> decode_raw(std::span<const std::byte> block, uint32_t df,
-                                            std::vector<Posting>& out) {
-  if (block.size() != uint64_t{df} * kRawPostingSize) {
-    return std::unexpected("raw postings block does not hold exactly df postings");
-  }
-  out.reserve(df);
-  for (std::size_t at = 0; at < block.size(); at += kRawPostingSize) {
-    out.push_back({load_le<uint32_t>(block, at), load_le<uint32_t>(block, at + 4)});
-  }
-  return {};
-}
-
-// What every list must satisfy, whichever way it was stored.
-std::expected<void, std::string> check_list(const std::vector<Posting>& list, uint32_t num_docs) {
-  for (std::size_t i = 0; i < list.size(); ++i) {
-    if (list[i].tf == 0) return std::unexpected("a posting has a frequency of 0");
-    if (list[i].doc >= num_docs)
-      return std::unexpected("a posting names a doc that is not in the index");
-    if (i > 0 && list[i].doc <= list[i - 1].doc) {
-      return std::unexpected("postings are not in increasing doc order");
-    }
-  }
-  return {};
-}
-
 std::expected<std::vector<Posting>, std::string> decode_list(const Context& ctx,
                                                              const TermEntry& entry,
                                                              std::span<const std::byte> postings) {
@@ -101,10 +75,9 @@ std::expected<std::vector<Posting>, std::string> decode_list(const Context& ctx,
   if (!block) return std::unexpected(block.error());
 
   std::vector<Posting> list;
-  const auto decoded = ctx.header.compressed() ? decode_postings(*block, entry.df, list)
-                                               : decode_raw(*block, entry.df, list);
+  const auto decoded =
+      decode_postings_block(*block, entry.df, ctx.header.compressed(), ctx.header.num_docs, list);
   if (!decoded) return std::unexpected(decoded.error());
-  if (auto ok = check_list(list, ctx.header.num_docs); !ok) return std::unexpected(ok.error());
   return list;
 }
 

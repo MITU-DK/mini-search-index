@@ -39,5 +39,10 @@ add_executable(msearch app/main.cpp)
 target_link_libraries(msearch PRIVATE mse_app)
 target_compile_options(msearch PRIVATE ${MSE_WARNINGS})
 
+# The benchmark runner. Only numbers from a release build mean anything; it refuses to run otherwise.
+add_executable(msearch-bench bench/bench_main.cpp)
+target_link_libraries(msearch-bench PRIVATE mse_core)
+target_compile_options(msearch-bench PRIVATE ${MSE_WARNINGS})
+
 enable_testing()
 add_subdirectory(tests)

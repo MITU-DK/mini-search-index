@@ -8,26 +8,35 @@
 #   tools/run_benchmarks.sh b5 --machine laptop --profile main                (needs b2 and b1)
 #   tools/run_benchmarks.sh b6 --machine laptop --profile main                (needs b2 first)
 #   tools/run_benchmarks.sh b7 --machine laptop --profile main                (needs b2 first)
+#   tools/run_benchmarks.sh b8 --machine laptop --profile main [--budgets 256M,512M,1G] [--threads N|auto]
+#                                                      [--repeat N]   (bounded-memory builds)
 #
 #   tools/run_benchmarks.sh all --machine laptop --profile main               (b2, then the rest)
+#
+# b8 builds the corpus within each memory budget in a fresh process (so the peak memory is that
+# build's alone) and keeps the index of the last one as data/index/<profile>/vbyte.bin if there is none
+# yet, which is how the `full` index for b3, b4, b6 and b7 is made. Where vbyte.bin is already there
+# (the in-memory index of b2) it is compared with the new file byte for byte, and a difference is an
+# error. Defaults: budgets 64M,128M for dev, 256M,512M,1G for main and 2G,4G,8G for full; repeat 3 (1 for full).
 #
 # Each thread count runs in a fresh process, so peak memory is not carried over from a
 # previous one. The CSV of the benchmark is started again (not appended to) on every invocation.
 set -euo pipefail
 
-usage() { echo "usage: $0 <b1|b2|b3|b4|b5|b6|b7|all> --machine M --profile P [--threads SWEEP] [--repeat N]" >&2; exit 2; }
+usage() { echo "usage: $0 <b1|b2|b3|b4|b5|b6|b7|b8|all> --machine M --profile P [--threads SWEEP] [--repeat N] [--budgets LIST]" >&2; exit 2; }
 
 [ $# -ge 1 ] || usage
 benchmark=$1
 shift
-machine="" profile="" threads="auto" repeat=5
+machine="" profile="" threads="auto" repeat=5 repeat_set=no budgets=""
 while [ $# -gt 0 ]; do
   [ $# -ge 2 ] || usage
   case $1 in
     --machine) machine=$2 ;;
     --profile) profile=$2 ;;
     --threads) threads=$2 ;;
-    --repeat) repeat=$2 ;;
+    --repeat) repeat=$2; repeat_set=yes ;;
+    --budgets) budgets=$2 ;;
     *) usage ;;
   esac
   shift 2
@@ -39,6 +48,7 @@ cd "$root"
 
 if [ "$benchmark" = all ]; then
   # b2 first: it writes the index files that the others read. b5 needs the build time from b1.
+  # b8 is a separate step: for `full`, b1 and b2 (in-memory builds) do not fit.
   for each in b2 b1 b3 b4 b5 b6 b7; do
     echo "==== $each ===="
     "$0" "$each" --machine "$machine" --profile "$profile" --threads "$threads" --repeat "$repeat"
@@ -145,6 +155,54 @@ case $benchmark in
     index="data/index/$profile/vbyte.bin"
     [ -f "$index" ] || { echo "error: $index is missing; run b2 first" >&2; exit 1; }
     "$bench" suggest --index "$index" --n 1000 --seed 42 --machine "$machine" --profile "$profile"
+    ;;
+  b8)
+    # The bounded-memory build. One fresh process per budget and per repeat.
+    case $profile in
+      dev) default_budgets=64M,128M; default_repeat=3 ;;
+      main) default_budgets=256M,512M,1G; default_repeat=3 ;;
+      *) default_budgets=2G,4G,8G; default_repeat=1 ;;
+    esac
+    [ -n "$budgets" ] || budgets=$default_budgets
+    [ "$repeat_set" = yes ] || repeat=$default_repeat
+    [ "$threads" != auto ] || threads=$(nproc)
+    case $threads in *[!0-9]*|"") echo "error: b8 takes one thread count (a number or auto), not \"$threads\"" >&2; exit 2 ;; esac
+
+    index_dir="data/index/$profile"
+    tmp_dir="data/tmp/$profile-runs"
+    mkdir -p "$index_dir" "$tmp_dir"
+    candidate="$index_dir/b8.bin"
+    existing="$index_dir/vbyte.bin"
+
+    # Fail now, not hours in, if the disk is too small: the runs are about half the corpus, and the
+    # output and the writer's temporary files together about as much again.
+    corpus_bytes=$(cat "$corpus"/part-*.tsv | wc -c)
+    need_bytes=$((corpus_bytes * 6 / 5))
+    free_bytes=$(df --output=avail -B1 "$index_dir" | tail -1)
+    if [ "$free_bytes" -lt "$need_bytes" ]; then
+      echo "error: b8 needs about $((need_bytes / 1000000000)) GB free in $index_dir and has $((free_bytes / 1000000000)) GB" >&2
+      exit 1
+    fi
+
+    rm -f "$out/b8_full-$profile.csv"
+    compare=()
+    [ -f "$existing" ] && compare=(--compare "$existing")
+    for budget in ${budgets//,/ }; do
+      for run in $(seq 1 "$repeat"); do
+        echo "b8: budget $budget, run $run of $repeat"
+        "$bench" full-build --corpus "$corpus" --budget "$budget" --threads "$threads" \
+          --tmp-dir "$tmp_dir" --out "$candidate" "${compare[@]}" \
+          --machine "$machine" --profile "$profile" --commit "$commit"
+      done
+    done
+    rmdir "$tmp_dir" 2> /dev/null || true
+    if [ -f "$existing" ]; then
+      rm -f "$candidate"
+    else
+      mv "$candidate" "$existing"
+      echo "kept the index as $existing"
+    fi
+    echo "wrote $out/b8_full-$profile.csv"
     ;;
   *) usage ;;
 esac

@@ -21,6 +21,11 @@
 //                                                 N seeded single-edit typos of common words
 //   msearch-bench spell --index F --typos FILE --machine M --profile P
 //                                                 spell check: brute force vs BK-tree (B6)
+//   msearch-bench full-build --corpus D --budget B --threads T --tmp-dir DIR --out FILE
+//                            --machine M --profile P --commit H [--compare FILE]
+//                                                 one bounded-memory build (B8), in this fresh
+//                                                 process; --compare checks the file against
+//                                                 another
 //   msearch-bench load --index F --mode parse|read|mmap --cache cold|warm --queries Q
 //                      --machine M --profile P --commit H [--record yes|no]
 //                                                 one load measurement, in this fresh process
@@ -43,6 +48,7 @@
 #include <vector>
 
 #include "autocomplete.hpp"
+#include "build_pipeline.hpp"
 #include "byte_source.hpp"
 #include "index.hpp"
 #include "index_writer.hpp"
@@ -165,6 +171,80 @@ int command_build(const Options& options) {
     }
   }
   return 0;
+}
+
+// Whether two files have the same bytes, compared a megabyte at a time.
+bool same_bytes(const std::filesystem::path& a, const std::filesystem::path& b) {
+  if (std::filesystem::file_size(a) != std::filesystem::file_size(b)) return false;
+  std::ifstream first(a, std::ios::binary);
+  std::ifstream second(b, std::ios::binary);
+  std::vector<char> left(1 << 20);
+  std::vector<char> right(1 << 20);
+  while (first && second) {
+    first.read(left.data(), static_cast<std::streamsize>(left.size()));
+    second.read(right.data(), static_cast<std::streamsize>(right.size()));
+    if (first.gcount() != second.gcount() ||
+        !std::equal(left.begin(), left.begin() + first.gcount(), right.begin())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+constexpr std::string_view kFullBuildHeader =
+    "commit,machine,budget_bytes,threads,total_s,scan_s,tokenize_s,merge_s,write_s,peak_rss_kb,"
+    "runs_spilled,merge_passes,spill_bytes,index_bytes,docs,terms,postings,identical_to_in_"
+    "memory\n";
+
+// One bounded-memory build (B8). The process is new for each budget, so the peak RSS is this
+// build's alone; the caller (tools/run_benchmarks.sh) starts one per budget and per repeat.
+int command_full_build(const Options& options) {
+#ifndef NDEBUG
+  std::cerr << "error: this is not a release build; its numbers would mean nothing. "
+               "Use: cmake --preset release && cmake --build --preset release\n";
+  return 1;
+#endif
+  const std::filesystem::path corpus = need(options, "corpus");
+  const std::filesystem::path out = need(options, "out");
+  const std::string machine = need(options, "machine");
+  const std::string profile = need(options, "profile");
+  const std::string commit = need(options, "commit");
+  const auto budget = mse::parse_memory_budget(need(options, "budget"));
+  if (!budget || *budget == 0)
+    throw std::invalid_argument("--budget must be a size above 0, like 2G");
+  const std::vector<unsigned> sweep = resolve_sweep(options);
+  if (sweep.size() != 1) throw std::invalid_argument("--threads must be one number or \"auto\"");
+
+  mse::BuildOptions build_options;
+  build_options.threads = sweep[0];
+  build_options.memory_budget_bytes = *budget;
+  build_options.tmp_dir = need(options, "tmp-dir");
+  mse::BuildStats stats;
+  const auto start = std::chrono::steady_clock::now();
+  const auto written = mse::build_to_file(corpus, out, build_options, {}, &stats);
+  const double total_s =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  if (!written) throw std::runtime_error(written.error());
+  const uint64_t peak_rss_kb = mse::read_proc_stats().hwm_kb;
+
+  std::string identical = "not_compared";
+  if (const auto other = options.find("compare"); other != options.end()) {
+    identical = same_bytes(out, other->second) ? "yes" : "no";
+  }
+
+  const std::filesystem::path csv_path =
+      std::filesystem::path(get_or(options, "results", "benchmarks/results")) / machine /
+      ("b8_full-" + profile + ".csv");
+  std::ofstream csv = open_csv(csv_path, kFullBuildHeader);
+  csv << commit << ',' << machine << ',' << *budget << ',' << stats.threads_used << ',' << total_s
+      << ',' << stats.scan_s << ',' << stats.tokenize_s << ',' << stats.merge_s << ','
+      << written->write_s << ',' << peak_rss_kb << ',' << stats.runs_spilled << ','
+      << stats.merge_passes << ',' << stats.spill_bytes << ',' << written->file_bytes << ','
+      << stats.docs << ',' << stats.terms << ',' << stats.postings << ',' << identical << std::endl;
+  std::cerr << "budget " << *budget / (1024 * 1024) << " MiB, " << stats.threads_used
+            << " threads: " << total_s << " s, peak " << peak_rss_kb / 1024 << " MiB, "
+            << stats.runs_spilled << " runs, identical: " << identical << "\n";
+  return identical == "no" ? 2 : 0;
 }
 
 // The bytes of all part files of a corpus.
@@ -889,6 +969,7 @@ int main(int argc, char** argv) {
     if (command == "quality") return command_quality(options);
     if (command == "pick-grep-terms") return command_pick_grep_terms(options);
     if (command == "load") return command_load(options);
+    if (command == "full-build") return command_full_build(options);
     if (command == "suggest") return command_suggest(options);
     if (command == "gen-typos") return command_gen_typos(options);
     if (command == "spell") return command_spell(options);

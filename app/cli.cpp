@@ -3,11 +3,13 @@
 #include <charconv>
 #include <chrono>
 #include <format>
+#include <iostream>
 #include <stdexcept>
 #include <system_error>
 
 #include "index_writer.hpp"
 #include "indexer.hpp"
+#include "searcher.hpp"
 
 namespace mse {
 namespace {
@@ -21,11 +23,23 @@ constexpr std::string_view kUsage =
     "Usage:\n"
     "  msearch index <corpus> -o <index.bin> [--threads N|auto] [--no-compress]\n"
     "  msearch query --corpus <dir> [--threads N|auto] [--rank bm25|tfidf] [-k N] <text>...\n"
+    "  msearch query -i <index.bin> [--load mmap|read] [--corpus <dir>] [--rank ...] [-k N] "
+    "<text>...\n"
+    "  msearch search -i <index.bin> [--load mmap|read] [--corpus <dir>] [--rank ...] [-k N]\n"
     "  msearch --help\n"
     "\n"
     "index builds the index and saves it to a file.\n"
-    "query builds the index in memory, then prints the top results with previews.\n"
+    "query with --corpus builds the index in memory first; with -i it opens a saved index.\n"
+    "search opens a saved index once and answers one query per line until the input ends.\n"
+    "With -i, --corpus tells where to read the previews from instead of the stored folder.\n"
     "Use \"--\" before the query text if the text itself starts with \"-\".\n";
+
+std::string_view trim(std::string_view text) {
+  constexpr std::string_view kBlanks = " \t\r\n";
+  const std::size_t first = text.find_first_not_of(kBlanks);
+  if (first == std::string_view::npos) return {};
+  return text.substr(first, text.find_last_not_of(kBlanks) - first + 1);
+}
 
 // The width of `text` in characters (UTF-8 continuation bytes don't count).
 std::size_t display_columns(std::string_view text) {
@@ -73,6 +87,40 @@ std::expected<std::size_t, std::string> parse_count(std::string_view flag, std::
   return number;
 }
 
+bool is_query_option(std::string_view flag) {
+  return flag == "--corpus" || flag == "-i" || flag == "--load" || flag == "--threads" ||
+         flag == "--rank" || flag == "-k";
+}
+
+// Applies one "--flag value" pair to `parsed`.
+std::expected<void, std::string> apply_query_option(QueryArgs& parsed, std::string_view flag,
+                                                    std::string_view value) {
+  if (flag == "--corpus") {
+    parsed.corpus = value;
+  } else if (flag == "-i") {
+    parsed.index = value;
+  } else if (flag == "--load") {
+    if (value != "mmap" && value != "read") {
+      return std::unexpected("--load must be mmap or read, got \"" + std::string(value) + "\"");
+    }
+    parsed.load = value == "mmap" ? LoadMode::Mmap : LoadMode::Read;
+  } else if (flag == "--threads") {
+    const auto threads = parse_threads(value);
+    if (!threads) return std::unexpected(threads.error());
+    parsed.threads = *threads;
+  } else if (flag == "--rank") {
+    if (value != "bm25" && value != "tfidf") {
+      return std::unexpected("--rank must be bm25 or tfidf, got \"" + std::string(value) + "\"");
+    }
+    parsed.mode = value == "bm25" ? RankMode::BM25 : RankMode::TFIDF;
+  } else {  // -k
+    const auto k = parse_count("-k", value);
+    if (!k) return std::unexpected(k.error());
+    parsed.k = *k;
+  }
+  return {};
+}
+
 std::string mebibytes(uint64_t bytes) {
   return std::format("{:.2f} MiB", static_cast<double>(bytes) / (1024.0 * 1024.0));
 }
@@ -111,27 +159,84 @@ int usage_error(std::string_view message, std::ostream& err) {
   return 1;
 }
 
-int run_query(const QueryArgs& args, std::ostream& out, std::ostream& err, bool color) {
-  using Clock = std::chrono::steady_clock;
+const char* load_mode_name(LoadMode mode) { return mode == LoadMode::Mmap ? "mmap" : "read"; }
 
-  const auto build_start = Clock::now();
+// Searches `text` and returns the printed results. The time shown covers the search and the
+// snippets, which is what the user waits for.
+template <IndexReader R>
+std::string answer(const R& reader, Searcher<R>& searcher, const QueryArgs& args,
+                   std::string_view text, std::string_view corpus_root_override, bool color) {
+  const auto start = std::chrono::steady_clock::now();
+  const SearchResponse response = searcher.search(text, {.k = args.k, .mode = args.mode});
+  const std::vector<ResultLine> lines = make_result_lines(reader, response, corpus_root_override);
+  const double took_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+  return format_results(lines, took_ms, color);
+}
+
+int query_in_memory(const QueryArgs& args, std::ostream& out, std::ostream& err, bool color) {
+  const auto build_start = std::chrono::steady_clock::now();
   auto index = build_index(args.corpus, {.threads = args.threads});
   if (!index) {
     err << "error: " << index.error() << "\n";
     return 1;
   }
-  err << std::format("Indexed {} docs in {:.1f} s\n", index->docs.size(),
-                     std::chrono::duration<double>(Clock::now() - build_start).count());
+  err << std::format(
+      "Indexed {} docs in {:.1f} s\n", index->docs.size(),
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count());
 
   const MemoryReader reader(*index);
   Searcher searcher(reader);
-  const auto search_start = Clock::now();
-  const SearchResponse response = searcher.search(args.text, {.k = args.k, .mode = args.mode});
-  const std::vector<ResultLine> lines = make_result_lines(reader, response);
-  const double took_ms =
-      std::chrono::duration<double, std::milli>(Clock::now() - search_start).count();
+  out << answer(reader, searcher, args, args.text, {}, color);
+  return 0;
+}
 
-  out << format_results(lines, took_ms, color);
+// Opens the saved index and says how long that took.
+std::expected<Index, std::string> open_saved_index(const QueryArgs& args, std::ostream& err) {
+  const auto start = std::chrono::steady_clock::now();
+  auto index = Index::open(args.index, args.load);
+  if (!index) return std::unexpected(index.error());
+  err << std::format(
+      "Index opened via {} in {:.2f} ms\n", load_mode_name(args.load),
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+  return index;
+}
+
+int query_saved_index(const QueryArgs& args, std::ostream& out, std::ostream& err, bool color) {
+  const auto index = open_saved_index(args, err);
+  if (!index) {
+    err << "error: " << index.error() << "\n";
+    return 1;
+  }
+  Searcher<IndexView> searcher(index->view());
+  out << answer(index->view(), searcher, args, args.text, args.corpus.string(), color);
+  return 0;
+}
+
+int run_query(const QueryArgs& args, std::ostream& out, std::ostream& err, bool color) {
+  return args.index.empty() ? query_in_memory(args, out, err, color)
+                            : query_saved_index(args, out, err, color);
+}
+
+// One query per input line, until the input ends or a line says "quit". The prompt goes to `err`
+// so that `out` holds nothing but results, even when it is piped.
+int run_search(const QueryArgs& args, std::istream& in, std::ostream& out, std::ostream& err,
+               bool color) {
+  const auto index = open_saved_index(args, err);
+  if (!index) {
+    err << "error: " << index.error() << "\n";
+    return 1;
+  }
+  Searcher<IndexView> searcher(index->view());
+
+  std::string line;
+  while (err << "> " << std::flush, std::getline(in, line)) {
+    const std::string_view text = trim(line);
+    if (text == "quit" || text == "exit") break;
+    if (text.empty()) continue;
+    out << answer(index->view(), searcher, args, text, args.corpus.string(), color) << std::flush;
+  }
+  err << "\n";
   return 0;
 }
 
@@ -157,53 +262,34 @@ std::string format_results(std::span<const ResultLine> lines, double took_ms, bo
   return out;
 }
 
-std::expected<QueryArgs, std::string> parse_query_args(std::span<const std::string_view> args) {
+std::expected<QueryArgs, std::string> parse_query_args(std::span<const std::string_view> args,
+                                                       bool text_required) {
   QueryArgs parsed;
   std::vector<std::string_view> words;
-  bool saw_corpus = false;
   bool only_words_left = false;
 
   for (std::size_t i = 0; i < args.size(); ++i) {
     const std::string_view arg = args[i];
     if (only_words_left || !arg.starts_with('-')) {
       words.push_back(arg);
-      continue;
-    }
-    if (arg == "--") {
+    } else if (arg == "--") {
       only_words_left = true;
-      continue;
-    }
-
-    if (arg != "--corpus" && arg != "--threads" && arg != "--rank" && arg != "-k") {
-      return std::unexpected("unknown option \"" + std::string(arg) + "\"");
-    }
-    if (i + 1 >= args.size()) return std::unexpected(std::string(arg) + " needs a value");
-    const std::string_view value = args[++i];
-
-    if (arg == "--corpus") {
-      parsed.corpus = value;
-      saw_corpus = true;
-    } else if (arg == "--threads") {
-      const auto threads = parse_threads(value);
-      if (!threads) return std::unexpected(threads.error());
-      parsed.threads = *threads;
-    } else if (arg == "--rank") {
-      if (value == "bm25") {
-        parsed.mode = RankMode::BM25;
-      } else if (value == "tfidf") {
-        parsed.mode = RankMode::TFIDF;
-      } else {
-        return std::unexpected("--rank must be bm25 or tfidf, got \"" + std::string(value) + "\"");
+    } else {
+      if (!is_query_option(arg))
+        return std::unexpected("unknown option \"" + std::string(arg) + "\"");
+      if (i + 1 >= args.size()) return std::unexpected(std::string(arg) + " needs a value");
+      if (auto ok = apply_query_option(parsed, arg, args[++i]); !ok) {
+        return std::unexpected(ok.error());
       }
-    } else {  // -k
-      auto k = parse_count("-k", value);
-      if (!k) return std::unexpected(k.error());
-      parsed.k = *k;
     }
   }
 
-  if (!saw_corpus) return std::unexpected("--corpus is required");
-  if (words.empty()) return std::unexpected("missing query text");
+  if (parsed.index.empty() && (!text_required || parsed.corpus.empty())) {
+    return std::unexpected(text_required ? "either -i <index> or --corpus <dir> is required"
+                                         : "-i <index> is required");
+  }
+  if (!text_required && !words.empty()) return std::unexpected("unexpected text after the options");
+  if (text_required && words.empty()) return std::unexpected("missing query text");
   for (std::size_t i = 0; i < words.size(); ++i) {
     if (i > 0) parsed.text += ' ';
     parsed.text += words[i];
@@ -245,8 +331,8 @@ std::expected<IndexArgs, std::string> parse_index_args(std::span<const std::stri
   return parsed;
 }
 
-int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostream& err,
-            bool color) {
+int run_cli(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
+            std::ostream& err, bool color) {
   if (args.empty()) {
     err << kUsage;
     return 1;
@@ -261,12 +347,19 @@ int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostr
     if (!parsed) return usage_error(parsed.error(), err);
     return run_index(*parsed, out, err);
   }
-  if (command == "query") {
-    const auto parsed = parse_query_args(args.subspan(1));
+  if (command == "query" || command == "search") {
+    const bool is_query = command == "query";
+    const auto parsed = parse_query_args(args.subspan(1), is_query);
     if (!parsed) return usage_error(parsed.error(), err);
-    return run_query(*parsed, out, err, color);
+    return is_query ? run_query(*parsed, out, err, color)
+                    : run_search(*parsed, in, out, err, color);
   }
   return usage_error("unknown command \"" + std::string(command) + "\"", err);
+}
+
+int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostream& err,
+            bool color) {
+  return run_cli(args, std::cin, out, err, color);
 }
 
 }  // namespace mse

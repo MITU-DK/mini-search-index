@@ -300,5 +300,124 @@ TEST(Cli, UsageMentionsBothCommands) {
   EXPECT_NE(result.out.find("msearch index"), std::string::npos);
 }
 
+// ---- querying a saved index ----
+
+// Writes the fixture's index into `dir` and returns its path.
+std::string fixture_index(const TempDir& dir) {
+  const auto index = build_index(tiny_corpus_dir(), {});
+  EXPECT_TRUE(index.has_value());
+  const auto path = dir.path() / "tiny.bin";
+  EXPECT_TRUE(write_index(*index, path, {}).has_value());
+  return path.string();
+}
+
+// The output without its first line, which holds the (varying) time.
+std::string without_timing(const std::string& out) { return out.substr(out.find('\n') + 1); }
+
+TEST(Cli, ParseQueryArgsWithAnIndex) {
+  auto parsed = parse_query_args(Args{"-i", "idx.bin", "--load", "read", "--corpus", "d", "fox"});
+  ASSERT_TRUE(parsed.has_value()) << parsed.error();
+  EXPECT_EQ(parsed->index, "idx.bin");
+  EXPECT_EQ(parsed->load, LoadMode::Read);
+  EXPECT_EQ(parsed->corpus, "d");  // with an index, this is where the snippets are read from
+
+  auto defaults = parse_query_args(Args{"-i", "idx.bin", "fox"});  // --corpus is optional now
+  ASSERT_TRUE(defaults.has_value()) << defaults.error();
+  EXPECT_EQ(defaults->load, LoadMode::Mmap);
+  EXPECT_TRUE(defaults->corpus.empty());
+  EXPECT_FALSE(parse_query_args(Args{"-i", "idx.bin", "--load", "magic", "fox"}).has_value());
+  EXPECT_FALSE(parse_query_args(Args{"-i"}).has_value());
+}
+
+TEST(Cli, ParseSearchArgsNeedsAnIndexAndNoQueryText) {
+  auto parsed = parse_query_args(Args{"-i", "idx.bin", "-k", "3"}, false);
+  ASSERT_TRUE(parsed.has_value()) << parsed.error();
+  EXPECT_EQ(parsed->k, 3u);
+  EXPECT_FALSE(parse_query_args(Args{"--corpus", "d"}, false).has_value());         // no index
+  EXPECT_FALSE(parse_query_args(Args{"-i", "idx.bin", "fox"}, false).has_value());  // stray text
+}
+
+TEST(Cli, QueryOnAnIndexGivesTheSameResultsAsBuildingInMemory) {
+  TempDir dir;
+  const std::string index = fixture_index(dir);
+  const CliRun built = run({"query", "--corpus", tiny_corpus_dir().string(), "machine learning"});
+  for (const char* load : {"mmap", "read"}) {
+    const CliRun saved = run({"query", "-i", index, "--load", load, "machine learning"});
+    EXPECT_EQ(saved.code, 0) << saved.err;
+    EXPECT_EQ(without_timing(saved.out), without_timing(built.out)) << load;
+    EXPECT_NE(saved.err.find(std::string("Index opened via ") + load + " in "), std::string::npos)
+        << saved.err;
+  }
+}
+
+TEST(Cli, QueryOnAnIndexCanTakeTheSnippetFolderFromTheCommandLine) {
+  TempDir dir;
+  const std::string index = fixture_index(dir);
+  const CliRun elsewhere =
+      run({"query", "-i", index, "--corpus", "/nonexistent/mse", "machine learning"});
+  EXPECT_EQ(elsewhere.code, 0) << elsewhere.err;
+  EXPECT_NE(elsewhere.out.find(" 1. Beta"), std::string::npos) << elsewhere.out;
+  EXPECT_NE(elsewhere.out.find("(document unavailable)"), std::string::npos) << elsewhere.out;
+
+  const CliRun back_home =
+      run({"query", "-i", index, "--corpus", tiny_corpus_dir().string(), "machine learning"});
+  EXPECT_EQ(back_home.out.find("(document unavailable)"), std::string::npos) << back_home.out;
+}
+
+TEST(Cli, QueryOnABadIndexFailsCleanly) {
+  TempDir dir;
+  const CliRun missing = run({"query", "-i", (dir.path() / "nope.bin").string(), "fox"});
+  EXPECT_EQ(missing.code, 1);
+  EXPECT_NE(missing.err.find("error:"), std::string::npos);
+  EXPECT_TRUE(missing.out.empty());
+
+  write_file(dir.path() / "junk.bin", std::string(500, 'x'));
+  const CliRun junk = run({"query", "-i", (dir.path() / "junk.bin").string(), "fox"});
+  EXPECT_EQ(junk.code, 1);
+  EXPECT_NE(junk.err.find("error:"), std::string::npos);
+}
+
+CliRun run_with_input(const Args& args, const std::string& input) {
+  std::istringstream in(input);
+  std::ostringstream out;
+  std::ostringstream err;
+  const int code = run_cli(args, in, out, err, false);
+  return {code, out.str(), err.str()};
+}
+
+TEST(Cli, SearchAnswersEachLineUntilTheInputEnds) {
+  TempDir dir;
+  const std::string index = fixture_index(dir);
+  const CliRun result =
+      run_with_input({"search", "-i", index}, "machine learning\n\n   \nzzzz\nfox\n");
+  EXPECT_EQ(result.code, 0) << result.err;
+  EXPECT_NE(result.err.find("Index opened via mmap in "), std::string::npos) << result.err;
+  EXPECT_NE(result.out.find(" 1. Beta"), std::string::npos) << result.out;    // first query
+  EXPECT_NE(result.out.find("No results"), std::string::npos) << result.out;  // zzzz
+  EXPECT_NE(result.out.find("the quick brown fox"), std::string::npos) << result.out;  // fox
+  EXPECT_NE(result.err.find("> "), std::string::npos);  // the prompt goes to stderr
+}
+
+TEST(Cli, SearchStopsAtQuitAndUsesTheLoadMode) {
+  TempDir dir;
+  const std::string index = fixture_index(dir);
+  const CliRun result =
+      run_with_input({"search", "-i", index, "--load", "read"}, "alpha\nquit\nmachine learning\n");
+  EXPECT_EQ(result.code, 0);
+  EXPECT_NE(result.err.find("Index opened via read in "), std::string::npos);
+  EXPECT_NE(result.out.find("Alpha"), std::string::npos);
+  EXPECT_EQ(result.out.find("Beta"), std::string::npos);  // the line after "quit" was never read
+}
+
+TEST(Cli, SearchWithoutAnIndexIsAUsageError) {
+  const CliRun result = run_with_input({"search"}, "");
+  EXPECT_EQ(result.code, 1);
+  EXPECT_NE(result.err.find("Usage:"), std::string::npos);
+}
+
+TEST(Cli, UsageMentionsSearch) {
+  EXPECT_NE(run({"--help"}).out.find("msearch search"), std::string::npos);
+}
+
 }  // namespace
 }  // namespace mse

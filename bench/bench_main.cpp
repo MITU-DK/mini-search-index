@@ -6,6 +6,12 @@
 //   msearch-bench build --corpus D --threads <sweep> --repeat N --machine M --profile P
 //                       --commit H [--results DIR]
 //
+//   msearch-bench queries --index F --count N --seed S --out FILE
+//                                                 known-item queries: the titles of N random docs
+//   msearch-bench load --index F --mode parse|read|mmap --cache cold|warm --queries Q
+//                      --machine M --profile P --commit H [--record yes|no]
+//                                                 one load measurement, in this fresh process
+//
 // For a clean peak-RSS number, tools/run_benchmarks.sh starts a new process for each thread count.
 #include <algorithm>
 #include <charconv>
@@ -15,14 +21,20 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <random>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <vector>
 
+#include "byte_source.hpp"
+#include "index.hpp"
 #include "index_writer.hpp"
 #include "indexer.hpp"
+#include "parsed_loader.hpp"
 #include "procstats.hpp"
+#include "searcher.hpp"
 #include "thread_sweep.hpp"
 #include "varint.hpp"
 
@@ -90,12 +102,12 @@ Run run_build_once(const std::filesystem::path& corpus, unsigned threads) {
 constexpr std::string_view kBuildHeader =
     "commit,machine,threads,run,scan_s,tokenize_s,merge_s,total_s,peak_rss_kb\n";
 
-std::ofstream open_csv(const std::filesystem::path& path) {
+std::ofstream open_csv(const std::filesystem::path& path, std::string_view header) {
   std::filesystem::create_directories(path.parent_path());
   const bool is_new = !std::filesystem::exists(path) || std::filesystem::file_size(path) == 0;
   std::ofstream csv(path, std::ios::app);
   if (!csv) throw std::runtime_error("cannot write " + path.string());
-  if (is_new) csv << kBuildHeader;
+  if (is_new) csv << header;
   return csv;
 }
 
@@ -119,7 +131,7 @@ int command_build(const Options& options) {
   const std::filesystem::path csv_path =
       std::filesystem::path(get_or(options, "results", "benchmarks/results")) / machine /
       ("b1_build-" + profile + ".csv");
-  std::ofstream csv = open_csv(csv_path);
+  std::ofstream csv = open_csv(csv_path, kBuildHeader);
 
   for (const unsigned threads : sweep) {
     std::cerr << "T=" << threads << ": warm-up run (discarded)\n";
@@ -231,6 +243,138 @@ int command_size(const Options& options) {
   return 0;
 }
 
+// ---- queries and load measurements ----
+
+int command_queries(const Options& options) {
+  auto index = mse::Index::open(need(options, "index"), mse::LoadMode::Mmap);
+  if (!index) throw std::runtime_error(index.error());
+  const mse::IndexView& view = index->view();
+  if (view.num_docs() == 0) throw std::runtime_error("the index has no docs to take queries from");
+
+  const unsigned count = parse_repeat(need(options, "count"));
+  std::mt19937 rng(static_cast<uint32_t>(std::stoul(need(options, "seed"))));
+  std::ofstream out(need(options, "out"), std::ios::trunc);
+  for (unsigned i = 0; i < count; ++i) {
+    out << view.doc_title(static_cast<uint32_t>(rng() % view.num_docs())) << '\n';
+  }
+  if (!out) throw std::runtime_error("cannot write " + need(options, "out"));
+  return 0;
+}
+
+std::vector<std::string> read_queries(const std::string& path) {
+  std::ifstream in(path);
+  if (!in) throw std::runtime_error("cannot read " + path);
+  std::vector<std::string> queries;
+  for (std::string line; std::getline(in, line);) queries.push_back(line);
+  if (queries.empty()) throw std::runtime_error(path + " has no queries");
+  return queries;
+}
+
+constexpr std::size_t kLoadQueries = 1000;
+
+constexpr std::string_view kLoadHeader =
+    "commit,mode,cache,open_ms,first_query_ms,rss_after_open_kb,rss_anon_after_open_kb,"
+    "rss_file_after_open_kb,rss_after_1000q_kb,major_faults_open,major_faults_first_query,"
+    "minor_faults_first_query\n";
+
+struct LoadRow {
+  double open_ms = 0;
+  double first_query_ms = 0;
+  mse::ProcStats after_open;
+  uint64_t rss_after_queries_kb = 0;
+  uint64_t major_faults_open = 0;
+  uint64_t major_faults_first_query = 0;
+  uint64_t minor_faults_first_query = 0;
+};
+
+double milliseconds_since(std::chrono::steady_clock::time_point start) {
+  return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+      .count();
+}
+
+// Runs the queries over an opened index. The first one, with the searcher's setup, is timed on its
+// own, because on a cold index that is where the pages get loaded.
+template <mse::IndexReader R>
+void measure_queries(const R& reader, const std::vector<std::string>& queries, LoadRow& row) {
+  const auto first_start = std::chrono::steady_clock::now();
+  mse::Searcher<R> searcher(reader);
+  (void)searcher.search(queries[0]);
+  row.first_query_ms = milliseconds_since(first_start);
+  const mse::ProcStats after_first = mse::read_proc_stats();
+  row.major_faults_first_query = after_first.major_faults - row.after_open.major_faults;
+  row.minor_faults_first_query = after_first.minor_faults - row.after_open.minor_faults;
+
+  for (std::size_t i = 1; i < std::min(queries.size(), kLoadQueries); ++i) {
+    (void)searcher.search(queries[i]);
+  }
+  row.rss_after_queries_kb = mse::read_proc_stats().rss_kb;
+}
+
+// Opens the index the way `mode` says, then runs the queries.
+LoadRow measure_load(const std::filesystem::path& index, const std::string& mode,
+                     const std::vector<std::string>& queries) {
+  LoadRow row;
+  const mse::ProcStats before = mse::read_proc_stats();
+  const auto start = std::chrono::steady_clock::now();
+  const auto finish_open = [&] {
+    row.open_ms = milliseconds_since(start);
+    row.after_open = mse::read_proc_stats();
+    row.major_faults_open = row.after_open.major_faults - before.major_faults;
+  };
+
+  if (mode == "parse") {
+    const auto parsed = mse::load_parsed(index);
+    if (!parsed) throw std::runtime_error(parsed.error());
+    finish_open();
+    const mse::MemoryReader reader(*parsed);
+    measure_queries(reader, queries, row);
+  } else {
+    const auto opened =
+        mse::Index::open(index, mode == "mmap" ? mse::LoadMode::Mmap : mse::LoadMode::Read);
+    if (!opened) throw std::runtime_error(opened.error());
+    finish_open();
+    measure_queries(opened->view(), queries, row);
+  }
+  return row;
+}
+
+int command_load(const Options& options) {
+#ifndef NDEBUG
+  std::cerr << "error: this is not a release build; its numbers would mean nothing.\n";
+  return 1;
+#endif
+  const std::filesystem::path index = need(options, "index");
+  const std::string mode = need(options, "mode");
+  const std::string cache = need(options, "cache");
+  if (mode != "parse" && mode != "read" && mode != "mmap") {
+    throw std::invalid_argument("--mode must be parse, read or mmap");
+  }
+  if (cache != "cold" && cache != "warm")
+    throw std::invalid_argument("--cache must be cold or warm");
+  const std::vector<std::string> queries = read_queries(need(options, "queries"));
+
+  if (cache == "cold") {
+    const auto evicted = mse::evict_from_page_cache(index);
+    if (!evicted) throw std::runtime_error(evicted.error());
+  }
+  const LoadRow row = measure_load(index, mode, queries);
+
+  std::ostringstream line;
+  line << need(options, "commit") << ',' << mode << ',' << cache << ',' << row.open_ms << ','
+       << row.first_query_ms << ',' << row.after_open.rss_kb << ',' << row.after_open.rss_anon_kb
+       << ',' << row.after_open.rss_file_kb << ',' << row.rss_after_queries_kb << ','
+       << row.major_faults_open << ',' << row.major_faults_first_query << ','
+       << row.minor_faults_first_query << '\n';
+  std::cerr << mode << '/' << cache << ": " << line.str();
+  if (get_or(options, "record", "yes") == "yes") {
+    const std::filesystem::path csv_path =
+        std::filesystem::path(get_or(options, "results", "benchmarks/results")) /
+        need(options, "machine") / ("b3_load-" + need(options, "profile") + ".csv");
+    open_csv(csv_path, kLoadHeader) << line.str();
+  }
+  return 0;
+}
+
 int command_sweep(const Options& options) {
   for (const unsigned threads : resolve_sweep(options)) std::cout << threads << "\n";
   return 0;
@@ -247,6 +391,8 @@ int main(int argc, char** argv) {
     if (command == "build") return command_build(options);
     if (command == "sweep") return command_sweep(options);
     if (command == "size") return command_size(options);
+    if (command == "queries") return command_queries(options);
+    if (command == "load") return command_load(options);
     throw std::invalid_argument("unknown command \"" + std::string(command) + "\"");
   } catch (const std::exception& e) {
     std::cerr << "error: " << e.what() << "\n";

@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <expected>
 #include <filesystem>
+#include <istream>
 #include <optional>
 #include <ostream>
 #include <span>
@@ -11,6 +12,7 @@
 #include <string_view>
 #include <vector>
 
+#include "index.hpp"
 #include "ranker.hpp"
 #include "reader.hpp"
 #include "searcher.hpp"
@@ -25,14 +27,17 @@ struct ResultLine {
   std::optional<Snippet> snippet;
 };
 
-// Joins hits with their titles and snippets. `response.terms` are what get highlighted.
+// Joins hits with their titles and snippets. `response.terms` are what get highlighted. Snippets
+// are read from the reader's corpus root, or from `corpus_root_override` if that is not empty.
 template <IndexReader R>
-std::vector<ResultLine> make_result_lines(const R& reader, const SearchResponse& response) {
+std::vector<ResultLine> make_result_lines(const R& reader, const SearchResponse& response,
+                                          std::string_view corpus_root_override = {}) {
   std::vector<ResultLine> lines;
   lines.reserve(response.hits.size());
   for (const SearchResult& hit : response.hits) {
     std::optional<Snippet> snippet;
-    if (auto made = snippet_for(reader, hit.doc, response.terms)) snippet = std::move(*made);
+    if (auto made = snippet_for(reader, hit.doc, response.terms, corpus_root_override))
+      snippet = std::move(*made);
     lines.push_back({std::string(reader.doc_title(hit.doc)), hit.score, std::move(snippet)});
   }
   return lines;
@@ -42,17 +47,20 @@ std::vector<ResultLine> make_result_lines(const R& reader, const SearchResponse&
 std::string format_results(std::span<const ResultLine> lines, double took_ms, bool color);
 
 struct QueryArgs {
-  std::filesystem::path corpus;
+  std::filesystem::path corpus;  // build in memory from this; with `index`, snippets come from here
+  std::filesystem::path index;   // a saved index to open instead of building one
+  LoadMode load = LoadMode::Mmap;
   unsigned threads = 1;
   RankMode mode = RankMode::BM25;
   std::size_t k = kDefaultTopK;
   std::string text;
 };
 
-// Parses what follows `msearch query`. Words that are not flags are joined with spaces into the
-// query text, and everything after "--" is query text.
+// Parses what follows `msearch query` (or `msearch search`, with text_required = false). Words that
+// are not flags are joined with spaces into the query text, and everything after "--" is query
+// text. Either `-i <index>` or `--corpus <dir>` is needed; `search` needs `-i` and takes no text.
 [[nodiscard]] std::expected<QueryArgs, std::string> parse_query_args(
-    std::span<const std::string_view> args);
+    std::span<const std::string_view> args, bool text_required = true);
 
 struct IndexArgs {
   std::filesystem::path corpus;
@@ -65,8 +73,12 @@ struct IndexArgs {
 [[nodiscard]] std::expected<IndexArgs, std::string> parse_index_args(
     std::span<const std::string_view> args);
 
-// Runs `msearch <args>`: results go to `out`, progress and errors to `err`.
-// Returns the process exit code: 0 on success, 1 on any error.
+// Runs `msearch <args>`: results go to `out`, progress and errors to `err`, and `search` reads its
+// queries from `in`. Returns the process exit code: 0 on success, 1 on any error.
+int run_cli(std::span<const std::string_view> args, std::istream& in, std::ostream& out,
+            std::ostream& err, bool color);
+
+// The same with standard input.
 int run_cli(std::span<const std::string_view> args, std::ostream& out, std::ostream& err,
             bool color);
 

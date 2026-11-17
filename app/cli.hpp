@@ -68,6 +68,8 @@ struct IndexArgs {
   std::filesystem::path out;
   unsigned threads = 1;
   bool compress = true;
+  uint64_t memory_budget_bytes = 0;  // 0: build in memory; otherwise spill sorted runs to disk
+  std::filesystem::path tmp_dir;     // where the runs go; empty: next to the output file
 };
 
 // Parses what follows `msearch index`: one corpus directory and `-o <file>`, in any order.

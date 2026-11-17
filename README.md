@@ -54,7 +54,7 @@ speeds up by much less than the number of threads.
 | 16 | 6.70 | 3.98x |
 | 20 | 6.87 | 3.89x |
 
-Tokenizing scales (26.4 s with 1 thread, 5.08 s with 20), but the merge stage takes 1.31 to 1.61 s whatever the thread count. It runs in parallel, but each worker keeps its own list for almost every common term, so the work to combine them grows with the number of workers (exploratory measurements in [benchmarks/NOTES.md](benchmarks/NOTES.md)). That is a known limit of this design, and part of why the speed-up flattens; the bounded-memory build planned next replaces this merge.
+Tokenizing scales (26.4 s with 1 thread, 5.08 s with 20), but the merge stage takes 1.31 to 1.61 s whatever the thread count. It runs in parallel, but each worker keeps its own list for almost every common term, so the work to combine them grows with the number of workers (exploratory measurements in [benchmarks/NOTES.md](benchmarks/NOTES.md)). That is a known limit of this design, and part of why the speed-up flattens. (`--memory-budget` selects a different build, a bounded-memory one with a single k-way merge, which is not part of this table.)
 
 Only one machine (laptop) has been measured so far. Its 20 logical CPUs are 6 fast cores with two threads each plus 8 slower cores, so the curve flattens early; a run on a machine with uniform cores is planned and will be added here (see [docs/CLOUD.md](docs/CLOUD.md)).
 <!-- END generated:scaling -->
@@ -94,6 +94,14 @@ build/release/msearch index data/corpus/dev -o data/index/dev.bin --threads auto
 build/release/msearch query -i data/index/dev.bin "quantum mechanics"
 build/release/msearch search -i data/index/dev.bin              # interactive; ":suggest alg" completes a word
 build/release/msearch serve -i data/index/dev.bin --threads auto --port 8080
+```
+
+To index more text than fits in memory, give the build a memory budget and a folder for its temporary
+files (they are removed when it ends, and need roughly as much disk as the index itself):
+
+```sh
+build/release/msearch index data/corpus/main -o data/index/main.bin --threads auto \
+    --memory-budget 1G --tmp-dir /var/tmp/mse-runs
 ```
 
 `--threads` takes a number or `auto` (all logical CPUs) for both `index` and `serve`. `serve` listens on
@@ -157,6 +165,11 @@ The design decisions that matter, each measured in a benchmark:
 - **Safe writes and defensive reading.** The index is written to a temporary file, synced and renamed, so a
   crash never leaves half a file. Anything read from outside (files, the index, queries, HTTP parameters)
   returns an error instead of crashing, and damaged index files are covered by tests.
+- **A memory budget by spilling sorted runs (SPIMI).** With `--memory-budget`, each worker counts postings in
+  memory until it reaches its share of the budget, then sorts them and writes a run file; one k-way merge with a
+  heap then streams every term, in order, into the same `IndexWriter` the in-memory build uses. The output is
+  byte-identical to the in-memory build for any thread count and any budget (a test builds the same corpus both
+  ways and compares the files). The budget pays first for the document table and some memory per thread.
 - **No text in the index.** Snippets are read from the corpus files with `pread`, `k` lines per query. This
   keeps the index small, and means the corpus folder has to be there when searching (or given with `--corpus`).
 
@@ -178,8 +191,10 @@ The design decisions that matter, each measured in a benchmark:
 - **The ranking numbers are optimistic.** The queries are article titles, and titles are indexed, so every
   query word is in the right article. Real queries do not guarantee that. MRR@10 compares BM25 with TF-IDF on
   this task; it is not a judgement of search quality on real information needs.
-- **The index is built in memory.** Peak memory while building is in the B1 table of RESULTS.md and grows with
-  the corpus, so full Wikipedia does not fit this design; a bounded-memory build is the next step.
+- **By default the index is built in memory.** Peak memory while building is in the B1 table of RESULTS.md and
+  grows with the corpus. For a corpus that does not fit, `--memory-budget` selects a bounded-memory build (see
+  below), which writes sorted pieces to disk and merges them with one sequential k-way merge. It makes the
+  same file, but it is not a faster build.
 - **Indexing does not scale with the number of threads.** The speed-up table above shows it. The merge stage
   does not get faster with more threads (see above), and the laptop's cores are not all alike. Only one machine
   has been measured.

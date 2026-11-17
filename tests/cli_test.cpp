@@ -7,9 +7,11 @@
 #include <string_view>
 #include <vector>
 
+#include "file_bytes.hpp"
 #include "index_writer.hpp"
 #include "indexer.hpp"
 #include "parsed_loader.hpp"
+#include "synthetic_corpus.hpp"
 #include "temp_dir.hpp"
 #include "test_data.hpp"
 
@@ -296,7 +298,44 @@ TEST(Cli, ParseIndexArgsErrors) {
   }
 }
 
+TEST(Cli, ParseIndexArgsMemoryBudget) {
+  auto parsed = parse_index_args(
+      Args{"data/dev", "-o", "idx.bin", "--memory-budget", "4G", "--tmp-dir", "/var/tmp/runs"});
+  ASSERT_TRUE(parsed.has_value()) << parsed.error();
+  EXPECT_EQ(parsed->memory_budget_bytes, 4294967296u);
+  EXPECT_EQ(parsed->tmp_dir, "/var/tmp/runs");
+  auto plain = parse_index_args(Args{"data/dev", "-o", "idx.bin"});
+  ASSERT_TRUE(plain.has_value());
+  EXPECT_EQ(plain->memory_budget_bytes, 0u);  // no budget: build in memory
+  EXPECT_TRUE(plain->tmp_dir.empty());
+  for (const Args& bad : std::vector<Args>{
+           {"data/dev", "-o", "i", "--memory-budget", "x"},
+           {"data/dev", "-o", "i", "--memory-budget"},
+           {"data/dev", "-o", "i", "--memory-budget", "-5"},
+           {"data/dev", "-o", "i", "--tmp-dir"},
+       }) {
+    EXPECT_FALSE(parse_index_args(bad).has_value()) << bad.back();
+  }
+}
+
 // ---- the index command ----
+
+TEST(Cli, IndexCommandWithABudgetWritesTheSameFile) {
+  TempDir corpus, dir, tmp;
+  write_synthetic_corpus(corpus.path(), 3000, 600, 2, 98);
+  const std::string plain = (dir.path() / "plain.bin").string();
+  const std::string limited = (dir.path() / "limited.bin").string();
+  ASSERT_EQ(run({"index", corpus.path().string(), "-o", plain, "--threads", "3"}).code, 0);
+  const CliRun result = run({"index", corpus.path().string(), "-o", limited, "--threads", "3",
+                             "--memory-budget", "64K", "--tmp-dir", tmp.path().string()});
+  EXPECT_EQ(result.code, 0) << result.err;
+  EXPECT_EQ(read_file(plain), read_file(limited));
+  EXPECT_NE(result.out.find("memory budget:"), std::string::npos) << result.out;
+  EXPECT_NE(result.out.find("runs"), std::string::npos) << result.out;
+  EXPECT_EQ(std::distance(std::filesystem::directory_iterator(tmp.path()),
+                          std::filesystem::directory_iterator()),
+            0);
+}
 
 TEST(Cli, IndexCommandWritesAnIndexAndReportsIt) {
   TempDir dir;

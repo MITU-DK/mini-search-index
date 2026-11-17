@@ -11,6 +11,7 @@
 #include <thread>
 
 #include "autocomplete.hpp"
+#include "build_pipeline.hpp"
 #include "index_writer.hpp"
 #include "indexer.hpp"
 #include "searcher.hpp"
@@ -27,6 +28,7 @@ constexpr std::string_view kIndent = "    ";
 constexpr std::string_view kUsage =
     "Usage:\n"
     "  msearch index <corpus> -o <index.bin> [--threads N|auto] [--no-compress]\n"
+    "                [--memory-budget 4G] [--tmp-dir DIR]\n"
     "  msearch query --corpus <dir> [--threads N|auto] [--rank bm25|tfidf] [-k N] <text>...\n"
     "  msearch query -i <index.bin> [--load mmap|read] [--corpus <dir>] [--rank ...] [-k N] "
     "<text>...\n"
@@ -37,7 +39,10 @@ constexpr std::string_view kUsage =
     "                [--host 127.0.0.1]\n"
     "  msearch --help\n"
     "\n"
-    "index builds the index and saves it to a file.\n"
+    "index builds the index and saves it to a file. With --memory-budget (a number with K, M or "
+    "G)\n"
+    "it keeps about that much in memory while building and writes sorted pieces to --tmp-dir,\n"
+    "which makes a corpus bigger than memory possible; the file is the same either way.\n"
     "query with --corpus builds the index in memory first; with -i it opens a saved index.\n"
     "search opens a saved index once and answers one query per line until the input ends.\n"
     "In search, \":suggest <prefix>\" completes a word, and \"quit\" ends the session.\n"
@@ -140,12 +145,12 @@ std::string mebibytes(uint64_t bytes) {
 
 int run_index(const IndexArgs& args, std::ostream& out, std::ostream& err) {
   BuildStats build;
-  auto index = build_index(args.corpus, {.threads = args.threads}, &build);
-  if (!index) {
-    err << "error: " << index.error() << "\n";
-    return 1;
-  }
-  const auto written = write_index(*index, args.out, {.compress = args.compress});
+  BuildOptions options;
+  options.threads = args.threads;
+  options.memory_budget_bytes = args.memory_budget_bytes;
+  options.tmp_dir = args.tmp_dir;
+  const auto written =
+      build_to_file(args.corpus, args.out, options, {.compress = args.compress}, &build);
   if (!written) {
     err << "error: " << written.error() << "\n";
     return 1;
@@ -164,6 +169,13 @@ int run_index(const IndexArgs& args, std::ostream& out, std::ostream& err) {
       args.corpus.string(), build.threads_used, build.docs, build.terms, build.postings,
       build.scan_s, build.tokenize_s, build.merge_s, written->write_s,
       mebibytes(written->file_bytes), args.out.string(), args.compress ? "gap + VByte" : "raw");
+  if (args.memory_budget_bytes != 0) {
+    out << std::format(
+        "  memory budget: {} ({} runs, {} written to disk{})\n",
+        mebibytes(args.memory_budget_bytes), build.runs_spilled, mebibytes(build.spill_bytes),
+        build.merge_passes == 0 ? std::string()
+                                : std::format(", {} extra merge pass(es)", build.merge_passes));
+  }
   return 0;
 }
 
@@ -452,12 +464,23 @@ std::expected<IndexArgs, std::string> parse_index_args(std::span<const std::stri
       saw_corpus = true;
     } else if (arg == "--no-compress") {
       parsed.compress = false;
-    } else if (arg == "-o" || arg == "--threads") {
+    } else if (arg == "-o" || arg == "--threads" || arg == "--memory-budget" ||
+               arg == "--tmp-dir") {
       if (i + 1 >= args.size()) return std::unexpected(std::string(arg) + " needs a value");
       const std::string_view value = args[++i];
       if (arg == "-o") {
         parsed.out = value;
         saw_out = true;
+        continue;
+      }
+      if (arg == "--tmp-dir") {
+        parsed.tmp_dir = value;
+        continue;
+      }
+      if (arg == "--memory-budget") {
+        const auto budget = parse_memory_budget(value);
+        if (!budget) return std::unexpected(budget.error());
+        parsed.memory_budget_bytes = *budget;
         continue;
       }
       const auto threads = parse_threads(value);

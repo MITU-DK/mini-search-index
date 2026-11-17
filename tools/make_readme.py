@@ -114,7 +114,8 @@ def scaling(results, machines, profile):
             "count. It runs in parallel, but each worker keeps its own list for almost every common term, so "
             "the work to combine them grows with the number of workers (exploratory measurements in "
             "[benchmarks/NOTES.md](benchmarks/NOTES.md)). That is a known limit of this design, and part of why "
-            "the speed-up flattens; the bounded-memory build planned next replaces this merge."]
+            "the speed-up flattens. (`--memory-budget` selects a different build, a bounded-memory one with a "
+            "single k-way merge, which is not part of this table.)"]
     if len(machines) > 1:
         out += ["", mr.combined_b1(results, machines)]
     else:

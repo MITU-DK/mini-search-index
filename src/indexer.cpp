@@ -12,31 +12,15 @@
 #include <thread>
 #include <unordered_map>
 
+#include "build_common.hpp"
 #include "corpus.hpp"
 #include "tokenizer.hpp"
 
 namespace mse {
 namespace {
 
-using Clock = std::chrono::steady_clock;
+using Clock = BuildClock;
 using PostingsMap = std::unordered_map<std::string, std::vector<Posting>>;
-
-double seconds_since(Clock::time_point start) {
-  return std::chrono::duration<double>(Clock::now() - start).count();
-}
-
-// Runs fn(0) .. fn(count - 1), each on its own thread, and returns when all are done.
-// With count == 1 there is no thread: fn(0) runs right here.
-template <class Fn>
-void run_in_parallel(unsigned count, Fn fn) {
-  if (count == 1) {
-    fn(0);
-    return;
-  }
-  std::vector<std::jthread> threads;  // joins when it goes out of scope
-  threads.reserve(count);
-  for (unsigned i = 0; i < count; ++i) threads.emplace_back(fn, i);
-}
 
 // ---- the workers: read, tokenize and count ----
 
@@ -50,15 +34,6 @@ struct WorkerResult {
 
 std::size_t shard_of(const std::string& term, std::size_t shard_count) {
   return shard_count == 1 ? 0 : std::hash<std::string>{}(term) % shard_count;
-}
-
-// Reads all of a batch's lines with a single read. Doc i of the batch starts at
-// docs[i].offset - docs[first].offset inside the returned bytes.
-std::expected<std::string, std::string> read_batch(const Corpus& corpus, const Batch& batch) {
-  const DocRef& first = corpus.docs[batch.first_doc];
-  const DocRef& last = corpus.docs[batch.first_doc + batch.count - 1];
-  const uint64_t end = last.offset + last.length;
-  return read_range(corpus.root / corpus.part_names[first.part], first.offset, end - first.offset);
 }
 
 // Appends {doc, tf} to the postings of every distinct term in `line`. A worker takes batches in

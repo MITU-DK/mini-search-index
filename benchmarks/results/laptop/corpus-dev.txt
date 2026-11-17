@@ -1,0 +1,4 @@
+docs_written=20000
+docs_skipped=6628
+bytes=374971374
+parts=6

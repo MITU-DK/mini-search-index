@@ -1,0 +1,11 @@
+date: 2026-11-17T11:46:34Z
+cpu: 12th Gen Intel(R) Core(TM) i7-12700H
+logical_cpus: 20
+cores_per_socket: 14
+threads_per_core: 2
+ram: 14Gi total, 5.8Gi available
+kernel: 7.0.0-43-generic
+compiler: g++ (Ubuntu 15.2.0-16ubuntu1) 15.2.0
+power_profile: balanced
+cpu_governor: powersave
+machine_model: VivoBook_ASUSLaptop K3502ZA

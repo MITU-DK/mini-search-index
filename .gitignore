@@ -1,5 +1,5 @@
 build/
-data/
+/data/
 *.bin
 *.tmp
 .venv/

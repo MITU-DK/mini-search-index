@@ -60,19 +60,37 @@ else
   major=$("$gxx" -dumpversion | cut -d. -f1)
   [ "$major" -ge 14 ] || { echo "g++ is version $major; version 14 or newer is needed"; missing=1; }
 fi
+command -v gcc > /dev/null || command -v cc > /dev/null || { echo "missing: a C compiler (gcc); googletest needs one"; missing=1; }
 [ "$missing" -eq 0 ] || { echo "error: install the missing tools first (see docs/CLOUD.md)" >&2; exit 1; }
 free_gb=$(df -P --block-size=1G . | awk 'NR == 2 { print $4 }')
 if ! done_marker "corpus-$profile" && [ "$free_gb" -lt "$need_gb" ]; then
   echo "error: $free_gb GB free, the $profile profile needs about $need_gb GB" >&2
   exit 1
 fi
+# The cold-cache benchmarks evict the index from the page cache, which a memory-backed filesystem
+# cannot do; they would stop with an error after the long steps, so refuse here.
+case $(stat -f -c %T .) in
+  tmpfs|ramfs) echo "error: this folder is on a memory-backed filesystem; use a real disk" >&2; exit 1 ;;
+esac
 echo "tools ok, $free_gb GB free, $(nproc) logical CPUs, $gxx $major"
 
 # ---- 2. the Python environment ----
 if ! done_marker venv; then
   step "setting up the Python environment"
-  python3 -m venv .venv
-  .venv/bin/pip install --quiet -r tools/requirements.txt
+  rm -rf .venv
+  if [ "$(python3 -c 'import sys; print(sys.version_info[1])')" -le 10 ]; then
+    python3 -m venv .venv
+    .venv/bin/pip install --quiet -r tools/requirements.txt
+  else
+    # WikiExtractor 3.0.6 fails on Python 3.11 and newer ("re.error: global flags not at the
+    # start of the expression"), and Ubuntu 24.04 has 3.12. uv fetches a Python 3.10 for the venv.
+    rm -rf data/.uv-bootstrap
+    python3 -m venv data/.uv-bootstrap
+    data/.uv-bootstrap/bin/pip install --quiet uv
+    data/.uv-bootstrap/bin/uv venv --python 3.10 .venv
+    data/.uv-bootstrap/bin/uv pip install --quiet --python .venv/bin/python -r tools/requirements.txt
+  fi
+  .venv/bin/python -c "import wikiextractor, matplotlib"  # fail here, not an hour later
   mark_done venv
 fi
 

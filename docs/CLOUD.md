@@ -15,7 +15,8 @@ tools/cloud/run_on_new_machine.sh cloud-32c main --threads 1,2,4,8,16,32
 
 1. checks that `g++` 14 or newer, `cmake`, `ninja`, `python3` with `venv`, `wget`, `git` and `tar`
    are installed, and that there is enough disk (4 GB for `dev`, 16 GB for `main`);
-2. creates the Python environment in `.venv`;
+2. creates the Python environment in `.venv` (a Python 3.10, fetched with `uv` if the system Python is
+   newer, because WikiExtractor 3.0.6 does not work on Python 3.11 and later);
 3. downloads the Wikipedia dump files for the profile (checking their checksums), extracts the articles
    with WikiExtractor and writes the packed corpus to `data/corpus/<profile>/`, then deletes the raw files;
 4. builds the `release` preset and runs the tests;
@@ -56,6 +57,7 @@ install the tools
 ```sh
 sudo apt-get update && sudo apt-get install -y g++-14 cmake ninja-build python3-venv wget git
 sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-14 100
+sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-14 100  # googletest needs a C compiler too
 ```
 
 clone the repository, and run the same script. Note the instance type (for example `c7i.8xlarge`) in the
@@ -93,6 +95,8 @@ and `docs/img/scaling.svg`.
   `benchmarks/NOTES.md`.
 - **Noisy neighbours.** On a shared host, other customers' work can slow some runs. The
   min to max range in the tables shows it: a wide range for one thread count means a disturbed run.
+- **Use a real disk.** Do not run it in a folder on `tmpfs` (often `/tmp`): a memory-backed
+  filesystem cannot be evicted from the page cache, and the script refuses to start there.
 - **Cold-cache numbers.** B3 and B4 evict the index file from the page cache with `posix_fadvise`.
   Some network disks hide the effect behind their own cache, so the major-fault check in those
   benchmarks may stop the run; the cold numbers cannot be trusted there.

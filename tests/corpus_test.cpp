@@ -2,23 +2,19 @@
 
 #include <gtest/gtest.h>
 
-#include <filesystem>
 #include <string>
 #include <string_view>
 
 #include "temp_dir.hpp"
+#include "test_data.hpp"
 
 namespace mse {
 namespace {
 
-namespace fs = std::filesystem;
-
-fs::path fixture_root() { return fs::path(MSE_TEST_DATA_DIR) / "tiny_corpus"; }
-
 // ---- open_corpus on the fixture (part-00000: docs 0-2, part-00001: docs 3-5) ----
 
 TEST(Corpus, OpensFixture) {
-  auto corpus = open_corpus(fixture_root());
+  auto corpus = open_corpus(tiny_corpus_dir());
   ASSERT_TRUE(corpus.has_value()) << corpus.error();
   EXPECT_TRUE(corpus->root.is_absolute());
   EXPECT_EQ(corpus->part_names, (std::vector<std::string>{"part-00000.tsv", "part-00001.tsv"}));
@@ -32,7 +28,7 @@ TEST(Corpus, OpensFixture) {
 }
 
 TEST(Corpus, LastLineWithoutNewline) {
-  auto corpus = open_corpus(fixture_root());
+  auto corpus = open_corpus(tiny_corpus_dir());
   ASSERT_TRUE(corpus.has_value()) << corpus.error();
   const DocRef last = corpus->docs[5];
   EXPECT_EQ(last.length, 11u);
@@ -43,13 +39,13 @@ TEST(Corpus, LastLineWithoutNewline) {
 }
 
 TEST(Corpus, EmptyDocIsKept) {
-  auto corpus = open_corpus(fixture_root());
+  auto corpus = open_corpus(tiny_corpus_dir());
   ASSERT_TRUE(corpus.has_value()) << corpus.error();
   EXPECT_EQ(corpus->docs[4].length, 1u);  // the line "\t"
 }
 
 TEST(Corpus, DefaultBatchesCoverEachPart) {
-  auto corpus = open_corpus(fixture_root());
+  auto corpus = open_corpus(tiny_corpus_dir());
   ASSERT_TRUE(corpus.has_value()) << corpus.error();
   ASSERT_EQ(corpus->batches.size(), 2u);
   EXPECT_EQ(corpus->batches[0].first_doc, 0u);
@@ -59,7 +55,7 @@ TEST(Corpus, DefaultBatchesCoverEachPart) {
 }
 
 TEST(Corpus, BatchesNeverCrossParts) {
-  auto corpus = open_corpus(fixture_root(), 2);
+  auto corpus = open_corpus(tiny_corpus_dir(), 2);
   ASSERT_TRUE(corpus.has_value()) << corpus.error();
   ASSERT_EQ(corpus->batches.size(), 4u);
   const uint32_t first[] = {0, 2, 3, 5};
@@ -80,7 +76,7 @@ TEST(Corpus, RootThatIsAFileIsError) {
   EXPECT_FALSE(open_corpus(dir.path() / "file").has_value());
 }
 
-TEST(Corpus, BatchSizeZeroIsError) { EXPECT_FALSE(open_corpus(fixture_root(), 0).has_value()); }
+TEST(Corpus, BatchSizeZeroIsError) { EXPECT_FALSE(open_corpus(tiny_corpus_dir(), 0).has_value()); }
 
 TEST(Corpus, EmptyDirIsEmpty) {
   TempDir dir;
@@ -168,20 +164,20 @@ TEST(Corpus, SplitLine) {
 // ---- read_range ----
 
 TEST(Corpus, ReadRangeReturnsExactBytes) {
-  auto bytes = read_range(fixture_root() / "part-00000.tsv", 6, 11);
+  auto bytes = read_range(tiny_corpus_dir() / "part-00000.tsv", 6, 11);
   ASSERT_TRUE(bytes.has_value()) << bytes.error();
   EXPECT_EQ(*bytes, "the quick b");  // "Alpha\t" is 6 bytes, then 11 bytes
 }
 
 TEST(Corpus, ReadRangeZeroLengthIsEmpty) {
-  auto bytes = read_range(fixture_root() / "part-00000.tsv", 0, 0);
+  auto bytes = read_range(tiny_corpus_dir() / "part-00000.tsv", 0, 0);
   ASSERT_TRUE(bytes.has_value()) << bytes.error();
   EXPECT_TRUE(bytes->empty());
 }
 
 TEST(Corpus, ReadRangePastEndIsError) {
-  EXPECT_FALSE(read_range(fixture_root() / "part-00001.tsv", 0, 100000).has_value());
-  EXPECT_FALSE(read_range(fixture_root() / "part-00001.tsv", 100000, 1).has_value());
+  EXPECT_FALSE(read_range(tiny_corpus_dir() / "part-00001.tsv", 0, 100000).has_value());
+  EXPECT_FALSE(read_range(tiny_corpus_dir() / "part-00001.tsv", 100000, 1).has_value());
 }
 
 TEST(Corpus, ReadRangeMissingFileIsError) {
